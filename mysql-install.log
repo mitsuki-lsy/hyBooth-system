@@ -1,0 +1,41 @@
+﻿**********************
+Windows PowerShell 脚本开始
+开始时间: 20260522142957
+用户名: LC\51475
+RunAs 用户: LC\51475
+配置名称: 
+计算机: LC (Microsoft Windows NT 10.0.22631.0)
+主机应用程序: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAiAFMAdABvAHAAIgAKAHQAcgB5ACAAewAKACAAIAAgACAAJgAgACIAQwA6AFwAVQBzAGUAcgBzAFwANQAxADQANwA1AFwARABvAGMAdQBtAGUAbgB0AHMAXABOAGUAdwAgAHAAcgBvAGoAZQBjAHQAXABpAG4AcwB0AGEAbABsAC0AbQB5AHMAcQBsAC0AcwBlAHIAdgBpAGMAZQAuAHAAcwAxACIAIAAtAFoAaQBwAFAAYQB0AGgAIAAiAEMAOgBcAFUAcwBlAHIAcwBcADUAMQA0ADcANQBcAEQAbwBjAHUAbQBlAG4AdABzAFwATgBlAHcAIABwAHIAbwBqAGUAYwB0AFwAbQB5AHMAcQBsAC0AOAAuADQALgA5AC0AdwBpAG4AeAA2ADQALgB6AGkAcAAiACAALQBSAGUAcwB1AGwAdABQAGEAdABoACAAIgBDADoAXABVAHMAZQByAHMAXAA1ADEANAA3ADUAXABEAG8AYwB1AG0AZQBuAHQAcwBcAE4AZQB3ACAAcAByAG8AagBlAGMAdABcAG0AeQBzAHEAbAAtAGkAbgBzAHQAYQBsAGwALQByAGUAcwB1AGwAdAAuAHQAeAB0ACIAIAAtAEwAbwBnAFAAYQB0AGgAIAAiAEMAOgBcAFUAcwBlAHIAcwBcADUAMQA0ADcANQBcAEQAbwBjAHUAbQBlAG4AdABzAFwATgBlAHcAIABwAHIAbwBqAGUAYwB0AFwAbQB5AHMAcQBsAC0AaQBuAHMAdABhAGwAbAAuAGwAbwBnACIACgAgACAAIAAgAGUAeABpAHQAIAAwAAoAfQAgAGMAYQB0AGMAaAAgAHsACgAgACAAIAAgAEEAZABkAC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAIgBDADoAXABVAHMAZQByAHMAXAA1ADEANAA3ADUAXABEAG8AYwB1AG0AZQBuAHQAcwBcAE4AZQB3ACAAcAByAG8AagBlAGMAdABcAG0AeQBzAHEAbAAtAGkAbgBzAHQAYQBsAGwALgBsAG8AZwAiACAALQBWAGEAbAB1AGUAIAAkAF8ALgBFAHgAYwBlAHAAdABpAG8AbgAuAFQAbwBTAHQAcgBpAG4AZwAoACkACgAgACAAIAAgAGUAeABpAHQAIAAxAAoAfQA=
+进程 ID: 102796
+PSVersion: 5.1.22621.6133
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.22621.6133
+BuildVersion: 10.0.22621.6133
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Downloading MySQL from https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.9-winx64.zip
+Extracting MySQL ZIP
+Initializing MySQL data directory
+2026-05-22T06:32:56.386549Z 0 [System] [MY-015017] [Server] MySQL Server Initialization - start.
+2026-05-22T06:32:56.393648Z 0 [System] [MY-013169] [Server] C:\mysql\bin\mysqld.exe (mysqld 8.4.9) initializing of serve
+r in progress as process 97392
+2026-05-22T06:32:56.412857Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.
+2026-05-22T06:32:56.726021Z 1 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.
+2026-05-22T06:32:58.142592Z 6 [Warning] [MY-010453] [Server] root@localhost is created with an empty password ! Please c
+onsider switching off the --initialize-insecure option.
+2026-05-22T06:33:00.175379Z 0 [System] [MY-015018] [Server] MySQL Server Initialization - end.
+Installing Windows service 'MySQL84'
+Service successfully installed.
+PS>TerminatingError():“方法调用失败，因为 [System.Security.Cryptography.RandomNumberGenerator] 不包含名为“Fill”的方法。”
+**********************
+Windows PowerShell 脚本结束
+结束时间: 20260522143302
+**********************
+System.Management.Automation.RuntimeException: 方法调用失败，因为 [System.Security.Cryptography.RandomNumberGenerator] 不包含名为“Fill”的方法。
+   在 System.Management.Automation.ExceptionHandlingOps.CheckActionPreference(FunctionContext funcContext, Exception exception)
+   在 System.Management.Automation.Interpreter.ActionCallInstruction`2.Run(InterpretedFrame frame)
+   在 System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)
+   在 System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)

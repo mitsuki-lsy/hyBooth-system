@@ -1,0 +1,6 @@
+MYSQL_INSTALL_OK
+InstallDir=C:\mysql
+ServiceName=MySQL84
+RootUser=root
+RootPassword=MySQL-ApwYwJjg897LEqGUlrCKxxbzXTAnTvR4
+ConnectCommand=mysql -u root -p -h 127.0.0.1

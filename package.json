@@ -1,0 +1,14 @@
+{
+  "name": "expo-sales-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "展位销售管理系统 MVP",
+  "scripts": {
+    "start": "node server.js",
+    "migrate:mysql": "node migrate_sqlite_to_mysql.js",
+    "mysql:init": "python mysql_store.py init"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
