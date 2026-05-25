@@ -6,10 +6,32 @@ const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const { URL } = require("url");
 
-const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
-const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) continue;
+    const key = trimmed.slice(0, equalsIndex).trim();
+    let value = trimmed.slice(equalsIndex + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadEnvFile(path.join(DATA_DIR, "mysql-app.env"));
+
+const PORT = Number(process.env.PORT || 3000);
+const PUBLIC_DIR = path.join(ROOT, "public");
 const UPLOAD_DIR = path.join(ROOT, "storage", "uploads");
 const SQLITE_FILE = path.join(DATA_DIR, "expo_sales.db");
 const SQLITE_HELPER = path.join(ROOT, "sqlite_store.py");
@@ -3215,5 +3237,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Expo Sales MVP running at http://localhost:${PORT}`);
+  console.log(`Database driver: ${DB_DRIVER}`);
   console.log("Demo accounts: admin/admin123, sales01/sales123");
 });

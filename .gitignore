@@ -5,6 +5,7 @@ storage/uploads/*
 !storage/uploads/.gitkeep
 server.out.log
 server.err.log
+*.log
 data/mysql-app.env
 node_modules/
 .python_deps/

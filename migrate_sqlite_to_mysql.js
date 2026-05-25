@@ -1,8 +1,31 @@
 const path = require("path");
+const fs = require("fs");
 const { spawnSync } = require("child_process");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) continue;
+    const key = trimmed.slice(0, equalsIndex).trim();
+    let value = trimmed.slice(equalsIndex + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadEnvFile(path.join(DATA_DIR, "mysql-app.env"));
+
 const SQLITE_FILE = process.env.SQLITE_FILE || path.join(DATA_DIR, "expo_sales.db");
 const SQLITE_HELPER = path.join(ROOT, "sqlite_store.py");
 const MYSQL_HELPER = path.join(ROOT, "mysql_store.py");
@@ -15,7 +38,7 @@ const BUNDLED_PYTHON_BIN = path.join(
   "python",
   "python.exe"
 );
-const PYTHON_BIN = process.env.PYTHON_BIN || (require("fs").existsSync(BUNDLED_PYTHON_BIN) ? BUNDLED_PYTHON_BIN : (process.platform === "win32" ? "python" : "python3"));
+const PYTHON_BIN = process.env.PYTHON_BIN || (fs.existsSync(BUNDLED_PYTHON_BIN) ? BUNDLED_PYTHON_BIN : (process.platform === "win32" ? "python" : "python3"));
 function run(command, args, input = "", label = "command") {
   const result = spawnSync(command, args, {
     input,
