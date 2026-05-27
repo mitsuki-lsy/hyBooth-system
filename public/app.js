@@ -6996,7 +6996,7 @@ const App = (() => {
       await run(() => api("/api/exhibitor/rentals", {
         method: "POST",
         body: { furnitureId: byId("rental-furniture").value, qty: Number(byId("rental-qty").value || 1) }
-      }), "展具申请已提交");
+      }), "展具申请已提交。");
     },
     async deleteRental(rentalId) {
       if (!window.confirm("确认删除这条展具增租申请？")) return;
