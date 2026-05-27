@@ -26,6 +26,10 @@ const App = (() => {
     customerModalOpen: false,
     customerAttendLeadId: null,
     companyDetailId: null,
+    companyEditId: null,
+    globalSearchQuery: "",
+    globalSearchOpen: false,
+    attachmentPreviewId: null,
     eventRoleModal: null,
     eventCreateModalOpen: false,
     warehouseCategory: "",
@@ -35,6 +39,15 @@ const App = (() => {
       result: "",
       keyword: ""
     },
+    exhibitorFilter: "",
+    newCustomerFilter: "",
+    oldCustomerFilter: "",
+    mapUndoStack: [],
+    mapRedoStack: [],
+    boothSizePreviewHistoryId: null,
+    obstacleSizePreviewHistoryId: null,
+    mapDragSnapshot: null,
+    mapObstacleDragSnapshot: null,
     customerDraft: {
       name: "",
       shortName: "",
@@ -220,6 +233,20 @@ const App = (() => {
     }[status] || status || "";
   }
 
+  function orderSpecialApproved(order) {
+    return Boolean(order?.specialApproved);
+  }
+
+  function orderDisplayStatusText(order) {
+    if (orderSpecialApproved(order)) return "特殊成交";
+    return statusText(order?.status);
+  }
+
+  function orderStatusBadge(order) {
+    const className = orderSpecialApproved(order) ? "special-sold" : order?.status || "";
+    return `<span class="status ${h(className)}">${h(orderDisplayStatusText(order))}</span>`;
+  }
+
   function attrText(attr) {
     return attr === "raw" ? "光地" : "标摊";
   }
@@ -246,6 +273,67 @@ const App = (() => {
 
   function fileUrl(id) {
     return `/api/files/${id}?token=${encodeURIComponent(state.token)}`;
+  }
+
+  function attachmentById(id) {
+    return (state.data?.attachments || []).find((item) => Number(item.id) === Number(id)) || null;
+  }
+
+  function formatFileSize(size) {
+    const bytes = Number(size || 0);
+    if (!bytes) return "未知大小";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function attachmentPreviewButton(id, label = "预览") {
+    const attachment = attachmentById(id);
+    if (!attachment) return `<span class="hint">无附件</span>`;
+    return `
+      <button type="button" class="tiny secondary" onclick="App.openAttachmentPreview(${Number(id)})">${h(label)}</button>
+      <a class="attachment-link" target="_blank" href="${fileUrl(id)}">下载</a>
+      <div class="hint">${h(attachment.fileName || "")} · ${formatFileSize(attachment.size)} · ${h(date(attachment.createdAt))}</div>
+    `;
+  }
+
+  function attachmentPreviewModal() {
+    if (!state.attachmentPreviewId) return "";
+    const attachment = attachmentById(state.attachmentPreviewId);
+    if (!attachment) return "";
+    const mime = String(attachment.mimeType || "");
+    const url = fileUrl(attachment.id);
+    const isImage = mime.startsWith("image/");
+    const isPdf = mime === "application/pdf" || /\.pdf$/i.test(attachment.fileName || "");
+    const isVideo = mime.startsWith("video/");
+    const body = isImage
+      ? `<img class="attachment-preview-media" src="${url}" alt="${h(attachment.fileName)}">`
+      : isPdf
+        ? `<iframe class="attachment-preview-frame" src="${url}" title="${h(attachment.fileName)}"></iframe>`
+        : isVideo
+          ? `<video class="attachment-preview-media" src="${url}" controls preload="metadata"></video>`
+          : `<div class="empty">该文件类型暂不支持内嵌预览，可以点击下载查看。</div>`;
+    return `
+      <div class="modal-backdrop">
+        <section class="modal large">
+          <header class="modal-header">
+            <h2>附件预览</h2>
+            <button class="secondary" onclick="App.closeAttachmentPreview()">关闭</button>
+          </header>
+          <div class="attachment-meta">
+            <strong>${h(attachment.fileName || "-")}</strong>
+            <span>${h(mime || "未知类型")}</span>
+            <span>${formatFileSize(attachment.size)}</span>
+            <span>${h(date(attachment.createdAt))}</span>
+            ${isVideo ? `<span>${mime.startsWith("video/") ? "浏览器可尝试播放" : "可能不可播放"}</span>` : ""}
+          </div>
+          ${body}
+          <div class="split-actions" style="margin-top:14px">
+            <a class="button-link" target="_blank" href="${url}">新窗口打开</a>
+          </div>
+        </section>
+      </div>
+    `;
   }
 
   function mapScale() {
@@ -304,6 +392,37 @@ const App = (() => {
   function effectiveMapZoom() {
     if (state.mapZoom === "fit") return Math.max(0.05, Number(state.fitMapZoom || 1));
     return Math.max(0.05, Number(state.mapZoom || 1));
+  }
+
+  function cloneMapSnapshot() {
+    return {
+      booths: JSON.parse(JSON.stringify(state.data?.booths || [])),
+      obstacles: JSON.parse(JSON.stringify(state.data?.obstacles || []))
+    };
+  }
+
+  function rememberMapState() {
+    if (!state.data) return;
+    state.mapUndoStack.push(cloneMapSnapshot());
+    if (state.mapUndoStack.length > 30) state.mapUndoStack.shift();
+    state.mapRedoStack = [];
+  }
+
+  async function restoreMapSnapshot(snapshot, success) {
+    if (!snapshot) return null;
+    const scroll = captureMapScroll();
+    const result = await run(() => api("/api/map/snapshot", {
+      method: "POST",
+      body: snapshot
+    }), success);
+    if (result) {
+      state.selectedBoothId = null;
+      state.selectedBoothIds.clear();
+      state.selectedObstacleId = null;
+      render();
+      restoreMapScroll(scroll);
+    }
+    return result;
   }
 
   function normalizeColor(value, index = 0) {
@@ -399,26 +518,28 @@ const App = (() => {
     if (!state.companyDetailId || !state.data) return "";
     const company = getCompany(state.companyDetailId);
     if (!company.id) return "";
-    const owner = getUser(company.ownerSalesId);
-    const lead = state.data.customerLeads.find((item) => Number(item.companyId) === Number(company.id) && item.status === "protected");
+    const lead = companyLead(company.id);
+    const orders = companyOrders(company.id);
     return `
       <div class="modal-backdrop">
-        <section class="modal small">
+        <section class="modal large">
           <header class="modal-header">
             <h2>${h(company.name || "企业详情")}</h2>
             <button class="secondary" onclick="App.closeCompanyDetail()">关闭</button>
           </header>
-          <div class="detail-grid">
-            <div><span>企业简称</span><strong>${h(companyShortNameText(company))}</strong></div>
-            <div><span>企业所在地</span><strong>${h(companyLocationText(company) || "-")}</strong></div>
-            <div><span>联系人</span><strong>${h(company.contactName || "-")}</strong></div>
-            <div><span>联系电话</span><strong>${h(company.phone || "-")}</strong></div>
-            <div><span>邮箱</span><strong>${h(company.email || "-")}</strong></div>
-            <div><span>保护业务员</span><strong>${h(owner.displayName || "-")}</strong></div>
-            <div><span>地址</span><strong>${h(company.address || "-")}</strong></div>
-            <div><span>税号</span><strong>${h(company.taxNo || "-")}</strong></div>
-          </div>
+          ${companyDetailSummary(company, lead, orders)}
           ${lead ? `<div class="detail-actions">${companyDetailActions(company, lead)}</div>` : ""}
+          <div class="detail-section">
+            <div class="section-title-row"><h2>客户资料</h2><span class="count-pill">${h(customerLeadTypeText(lead))}</span></div>
+            ${companyInfoGrid(company, lead)}
+          </div>
+          <div class="detail-section">
+            <div class="section-title-row"><h2>订单流程</h2><span class="count-pill">${orders.length} 个订单</span></div>
+            ${orders.map((order) => companyOrderDetail(company, order)).join("") || `<div class="empty">暂无订单</div>`}
+          </div>
+          ${companyAttachmentSection(company, lead, orders)}
+          ${companyProfileSection(orders)}
+          ${companyAuditSection(company, lead, orders)}
         </section>
       </div>
     `;
@@ -431,14 +552,401 @@ const App = (() => {
       <div class="detail-action-title">客户操作</div>
       <div class="inline-actions">
         ${order ? `<span class="status reserved">已创建订单</span>` : `<button class="tiny" onclick="App.customerAttend(${company.id}, ${lead.id})">参展</button>`}
+        ${companyEditToggle(company, lead)}
         ${releaseAction}
         ${leadUploadButtons(lead)}
       </div>
     `;
   }
 
+  function companyLead(companyId) {
+    return (state.data.customerLeads || []).find((item) => (
+      Number(item.companyId) === Number(companyId)
+      && String(item.eventId || state.data.settings.event.id) === String(state.data.settings.event.id)
+    )) || null;
+  }
+
+  function companyOrders(companyId) {
+    return (state.data.orders || [])
+      .filter((order) => Number(order.companyId) === Number(companyId))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  }
+
+  function companyOrderDetail(company, order) {
+    const profile = state.data.profiles.find((item) => Number(item.orderId) === Number(order.id));
+    const payments = (state.data.payments || []).filter((item) => Number(item.orderId) === Number(order.id));
+    return `
+      <div class="detail-order-card">
+        <div class="detail-order-head">
+          <div>
+            <strong>${h(order.orderNo)}</strong>
+            <div class="hint">${h(typeText(order.type))} · ${h(orderBoothNos(order) || order.title || "-")}</div>
+          </div>
+          <div>${orderStatusBadge(order)}</div>
+        </div>
+        ${orderTimelineHtml(order, companyLead(company.id), profile)}
+        <div class="detail-order-meta">
+          <span>订单金额：${money(order.totalAmount)}</span>
+          <span>已收款：${money(order.paidApprovedAmount || 0)}</span>
+          <span>业务员：${h(getUser(order.salespersonId).displayName || "-")}</span>
+          <span>展务：${profileProgressText(profile)}</span>
+          <span>水单：${h(payments.length ? payments.map((payment) => `${money(payment.amount)} ${statusText(payment.status)}`).join(" / ") : "暂无")}</span>
+        </div>
+        <div class="detail-actions">${orderActionButtons(order)}</div>
+      </div>
+    `;
+  }
+
+  function customerLeadTypeText(lead) {
+    if (!lead) return "客户档案";
+    const type = lead.customerType === "old" ? "老客户" : "新客户";
+    const status = { protected: "保护中", public: "公海", converted: "已参展" }[lead.status] || "保护中";
+    return `${type} · ${status}`;
+  }
+
+  function canAccessLeadOwner(lead) {
+    if (!lead || !state.data?.me) return false;
+    const role = state.data.me.role;
+    if (isAdminLikeRole(role)) return true;
+    if (role !== "sales") return false;
+    if (Number(lead.ownerSalesId) === Number(state.data.me.id)) return true;
+    if (customerTargetMode() !== "department") return false;
+    const owner = getUser(lead.ownerSalesId);
+    return Number(owner.departmentId || 0) && Number(owner.departmentId) === Number(state.data.me.departmentId || 0);
+  }
+
+  function canEditCompanyInfo(company, lead) {
+    if (!company?.id || !lead) return false;
+    if (lead.customerType !== "new" || lead.status !== "protected") return false;
+    if (activeOrderForCompany(company.id)) return false;
+    return canAccessLeadOwner(lead);
+  }
+
+  function companyEditToggle(company, lead) {
+    if (!canEditCompanyInfo(company, lead)) return "";
+    const editing = state.companyEditId === Number(company.id);
+    return editing
+      ? `<button class="tiny secondary" onclick="App.cancelCompanyEdit()">取消编辑</button>`
+      : `<button class="tiny secondary" onclick="App.startCompanyEdit(${Number(company.id)})">编辑资料</button>`;
+  }
+
+  function companyEditForm(company) {
+    const locationType = company.locationType === "overseas" ? "overseas" : "domestic";
+    const province = company.province || Object.keys(mainlandCityMap)[0] || "";
+    const city = company.city || (mainlandCityMap[province] || [])[0] || "";
+    const identityReadonly = isAdminLikeRole(state.data.me.role) ? "" : "readonly";
+    return `
+      <div class="company-edit-form">
+        <div class="grid two">
+          <label>${requiredLabel("企业名称")}<input id="edit-company-name" value="${h(company.name || "")}" ${identityReadonly} required></label>
+          <label>企业简称<input id="edit-company-short-name" value="${h(company.shortName || "")}" ${identityReadonly}></label>
+          <label>联系人<input id="edit-company-contact" value="${h(company.contactName || "")}" placeholder="${company.contactMasked ? "领取后可填写新的联系人" : ""}"></label>
+          <label>手机<input id="edit-company-phone" value="${h(company.phone || "")}" placeholder="${company.contactMasked ? "领取后可填写新的手机号" : ""}"></label>
+          <label>邮箱<input id="edit-company-email" value="${h(company.email || "")}"></label>
+          <label>税号<input id="edit-company-tax" value="${h(company.taxNo || "")}"></label>
+          <label>企业所在地<select id="edit-company-location-type" onchange="App.refreshCompanyEditLocation()">
+            <option value="domestic" ${locationType !== "overseas" ? "selected" : ""}>境内</option>
+            <option value="overseas" ${locationType === "overseas" ? "selected" : ""}>境外</option>
+          </select></label>
+          <label data-edit-location="overseas" style="${locationType === "overseas" ? "" : "display:none"}">国家或地区<select id="edit-company-country-region">${countryRegionOptions(company.countryRegion || "中国香港")}</select></label>
+          <label data-edit-location="domestic" style="${locationType === "overseas" ? "display:none" : ""}">省<select id="edit-company-province" onchange="App.refreshCompanyEditCities()">${provinceOptions(province)}</select></label>
+          <label data-edit-location="domestic" style="${locationType === "overseas" ? "display:none" : ""}">市<select id="edit-company-city">${cityOptions(province, city)}</select></label>
+          <label class="span-2">地址<input id="edit-company-address" value="${h(company.address || "")}"></label>
+        </div>
+        ${identityReadonly ? `<div class="hint">企业名称和企业简称仅管理员可修改。</div>` : ""}
+        ${company.contactMasked ? `<div class="hint">该客户来自公海，原联系人和手机号已按客户保护规则隐藏。你可以在这里填写新的联系方式，管理员仍可追溯原始数据。</div>` : ""}
+        <div class="split-actions" style="margin-top:14px">
+          <button onclick="App.saveCompanyEdit(${Number(company.id)})">保存资料</button>
+          <button class="secondary" onclick="App.cancelCompanyEdit()">取消</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function companyInfoGrid(company, lead) {
+    if (state.companyEditId === Number(company.id)) return companyEditForm(company);
+    const owner = getUser(company.ownerSalesId || lead?.ownerSalesId);
+    return `
+      <div class="detail-grid">
+        ${company.contactMasked ? `<div class="span-2"><span>联系方式保护</span><strong>原联系人和手机号已隐藏，可在编辑资料中录入新的联系方式</strong></div>` : ""}
+        <div><span>企业简称</span><strong>${h(companyShortNameText(company))}</strong></div>
+        <div><span>企业所在地</span><strong>${h(companyLocationText(company) || "-")}</strong></div>
+        <div><span>联系人</span><strong>${h(company.contactName || "-")}</strong></div>
+        <div><span>联系电话</span><strong>${h(company.phone || "-")}</strong></div>
+        <div><span>邮箱</span><strong>${h(company.email || "-")}</strong></div>
+        <div><span>保护业务员</span><strong>${h(owner.displayName || "-")}</strong></div>
+        <div><span>所属部门</span><strong>${h(departmentName(owner.departmentId))}</strong></div>
+        <div><span>保护到期</span><strong>${lead?.protectedUntil ? h(date(lead.protectedUntil)) : "-"}</strong></div>
+        <div><span>地址</span><strong>${h(company.address || "-")}</strong></div>
+        <div><span>税号</span><strong>${h(company.taxNo || "-")}</strong></div>
+      </div>
+    `;
+  }
+
+  function companyDetailSummary(company, lead, orders) {
+    const activeOrder = activeOrderForCompany(company.id);
+    const totalAmount = orders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
+    const paidAmount = orders.reduce((sum, order) => sum + Number(order.paidApprovedAmount || 0), 0);
+    const booths = orders.map(orderBoothNos).filter(Boolean).join(" / ") || "-";
+    const completedProfiles = orders.filter((order) => profileComplete(state.data.profiles.find((item) => Number(item.orderId) === Number(order.id)))).length;
+    const status = activeOrder ? statusText(activeOrder.status) : customerLeadTypeText(lead);
+    return `
+      <div class="customer-summary-grid">
+        <div class="customer-summary-card"><span>客户状态</span><strong>${h(status)}</strong><small>${h(customerLeadTypeText(lead))}</small></div>
+        <div class="customer-summary-card"><span>订单金额</span><strong>${money(totalAmount)}</strong><small>已收 ${money(paidAmount)}</small></div>
+        <div class="customer-summary-card"><span>关联展位</span><strong>${h(booths)}</strong><small>${orders.length} 个订单</small></div>
+        <div class="customer-summary-card"><span>企业展务</span><strong>${completedProfiles}/${orders.length || 0}</strong><small>已提交资料订单</small></div>
+      </div>
+    `;
+  }
+
+  function companyAttachmentSection(company, lead, orders) {
+    const rows = [];
+    if (lead) {
+      const contractAttachment = leadLatestAttachment(lead, "contract");
+      const voucherAttachment = leadLatestAttachment(lead, "voucher");
+      rows.push({
+        name: "客户合同",
+        status: statusText(leadFileStatus(lead, "contract")),
+        time: lead.contractReviewedAt || lead.updatedAt || lead.createdAt,
+        preview: contractAttachment ? attachmentPreviewButton(contractAttachment.id, "预览合同") : "暂无附件"
+      });
+      rows.push({
+        name: "客户水单",
+        status: statusText(leadFileStatus(lead, "voucher")),
+        time: lead.voucherReviewedAt || lead.updatedAt || lead.createdAt,
+        preview: voucherAttachment ? attachmentPreviewButton(voucherAttachment.id, "预览水单") : "暂无附件"
+      });
+    }
+    orders.forEach((order) => {
+      (state.data.payments || [])
+        .filter((payment) => Number(payment.orderId) === Number(order.id))
+        .forEach((payment) => {
+          rows.push({
+            name: `订单水单 · ${order.orderNo}`,
+            status: `${money(payment.amount)} ${statusText(payment.status)}`,
+            time: payment.reviewedAt || payment.createdAt,
+            preview: payment.voucherAttachmentId ? attachmentPreviewButton(payment.voucherAttachmentId, "预览水单") : "暂无附件"
+          });
+        });
+    });
+    if (!rows.length) return "";
+    return `
+      <div class="detail-section">
+        <div class="section-title-row"><h2>附件与收款</h2><span class="count-pill">${rows.length} 条记录</span></div>
+        <div class="detail-list">
+          ${rows.map((row) => `
+            <div class="detail-list-row">
+              <div><strong>${h(row.name)}</strong><span>${h(row.status)} · ${h(date(row.time))}</span></div>
+              <div>${row.preview}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function companyProfileSection(orders) {
+    const profiles = orders.map((order) => ({
+      order,
+      profile: state.data.profiles.find((item) => Number(item.orderId) === Number(order.id))
+    })).filter((item) => item.profile);
+    if (!profiles.length) return "";
+    return `
+      <div class="detail-section">
+        <div class="section-title-row"><h2>企业展务</h2><span class="count-pill">${profiles.length} 个后台</span></div>
+        <div class="profile-mini-grid">
+          ${profiles.map(({ order, profile }) => `
+            <div class="profile-mini-card">
+              <strong>${h(order.orderNo)}</strong>
+              <span>会刊：${profile.catalog?.companyIntro || profile.catalog?.productIntro || Number(profile.catalog?.videoAttachmentId || 0) ? "已填写" : "未填写"}</span>
+              <span>参展证：${(profile.badges || []).length} 人</span>
+              <span>楣板：${h(profile.fascia?.requestedName || profile.fascia?.defaultName || "-")} · ${h(statusText(profile.fascia?.status || "default"))}</span>
+              <span>展具增租：${(profile.rentals || []).length} 项</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function companyAuditSection(company, lead, orders) {
+    const orderIds = new Set(orders.map((order) => Number(order.id)));
+    const rows = approvalHistoryRows().filter((row) => {
+      const target = String(row.target || "");
+      if (target.includes(company.name || "")) return true;
+      return orders.some((order) => target.includes(order.orderNo || ""));
+    });
+    (state.data.logs || []).forEach((log) => {
+      const targetType = String(log.targetType || "");
+      const targetId = Number(log.targetId || 0);
+      const related = (targetType === "company" && targetId === Number(company.id))
+        || (targetType === "customerLead" && lead && targetId === Number(lead.id))
+        || (targetType === "order" && orderIds.has(targetId))
+        || String(log.detail || "").includes(company.name || "");
+      if (related) {
+        rows.push({
+          at: log.at,
+          flow: log.action || "操作日志",
+          target: company.name || "-",
+          submitter: log.userName || "-",
+          result: "log",
+          reviewer: log.userName || "-",
+          remark: log.detail || ""
+        });
+      }
+    });
+    const deduped = rows
+      .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0))
+      .filter((row, index, list) => index === list.findIndex((item) => `${item.at}-${item.flow}-${item.target}-${item.remark}` === `${row.at}-${row.flow}-${row.target}-${row.remark}`))
+      .slice(0, 12);
+    return `
+      <div class="detail-section">
+        <div class="section-title-row"><h2>审核与操作记录</h2><span class="count-pill">${deduped.length} 条</span></div>
+        ${deduped.length ? `
+          <div class="audit-mini-list">
+            ${deduped.map((row) => `
+              <div class="audit-mini-row">
+                <div><strong>${h(row.flow)}</strong><span>${h(date(row.at))} · ${h(row.submitter || "-")}</span></div>
+                <span class="status ${h(row.result)}">${h(row.result === "log" ? "记录" : statusText(row.result))}</span>
+                <p>${h(row.remark || "-")}</p>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div class="empty">暂无审核或操作记录</div>`}
+      </div>
+    `;
+  }
+
+  function timelineStep(label, stateText, done, active = false) {
+    return `
+      <div class="timeline-step ${done ? "done" : ""} ${active ? "active" : ""}">
+        <i></i>
+        <strong>${h(label)}</strong>
+        <span>${h(stateText || "-")}</span>
+      </div>
+    `;
+  }
+
+  function orderTimelineHtml(order, lead, profile) {
+    const contractStatus = leadFileStatus(lead, "contract");
+    const voucherStatus = leadFileStatus(lead, "voucher");
+    const paymentPending = hasPendingOrderPayment(order);
+    const paymentApproved = Number(order.paidApprovedAmount || 0) > 0;
+    const contractRequired = salesFlowMode() === "contract_first";
+    const profileReady = profileComplete(profile);
+    const contractDone = !contractRequired || contractStatus === "approved";
+    const voucherDone = voucherStatus === "approved" || paymentApproved;
+    const soldDone = order.status === "sold";
+    return `
+      <div class="order-timeline">
+        ${timelineStep("录入客户", getCompany(order.companyId).name || "已录入", true)}
+        ${timelineStep("预留展位", order.reserveExpiresAt ? `预留到 ${date(order.reserveExpiresAt)}` : statusText(order.status), order.type !== "booth" || isActiveOrder(order))}
+        ${timelineStep("合同", contractRequired ? statusText(contractStatus) : "可后补", contractDone, contractRequired && contractStatus === "pending")}
+        ${timelineStep("水单", paymentPending ? "审核中" : statusText(voucherStatus), voucherDone, paymentPending || voucherStatus === "pending")}
+        ${timelineStep("成交", soldDone ? "已成交" : "未成交", soldDone)}
+        ${timelineStep("企业展务", profileReady ? "资料已提交" : "资料待补", profileReady)}
+      </div>
+    `;
+  }
+
+  function profileComplete(profile) {
+    if (!profile) return false;
+    const catalog = profile.catalog || {};
+    return Boolean(catalog.companyIntro || catalog.productIntro || Number(catalog.videoAttachmentId || 0) || (catalog.productImageIds || []).length || (profile.badges || []).length || profile.fascia?.requestedName || (profile.rentals || []).length);
+  }
+
+  function profileProgressText(profile) {
+    if (!profile) return "未生成";
+    const items = [
+      profile.catalog?.companyIntro || profile.catalog?.productIntro ? "会刊" : "",
+      (profile.badges || []).length ? `证件${profile.badges.length}人` : "",
+      profile.fascia?.status && profile.fascia.status !== "default" ? "楣板" : "",
+      (profile.rentals || []).length ? `展具${profile.rentals.length}项` : ""
+    ].filter(Boolean);
+    return items.join(" / ") || "待提交";
+  }
+
   function companyNameKey(value) {
     return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+  }
+
+  function comparableTextKey(value) {
+    return companyNameKey(value).replace(/[\s\-_/\\.,，。·()（）【】\[\]]+/g, "");
+  }
+
+  function comparableCompanyKey(value) {
+    return comparableTextKey(value).replace(/(有限责任公司|股份有限公司|集团有限公司|有限公司|集团|公司)$/g, "");
+  }
+
+  function comparablePhoneKey(value) {
+    return String(value || "").replace(/\D+/g, "");
+  }
+
+  function comparableTaxKey(value) {
+    return String(value || "").trim().replace(/[\s\-_/\\]+/g, "").toUpperCase();
+  }
+
+  function textLooksSimilar(input, candidate) {
+    const a = comparableCompanyKey(input);
+    const b = comparableCompanyKey(candidate);
+    if (a.length < 2 || b.length < 2) return false;
+    if (a === b || a.includes(b) || b.includes(a)) return true;
+    const minRun = Math.min(3, Math.max(2, Math.min(a.length, b.length)));
+    for (let length = Math.min(a.length, b.length); length >= minRun; length -= 1) {
+      for (let index = 0; index + length <= a.length; index += 1) {
+        const part = a.slice(index, index + length);
+        if (part && b.includes(part)) return true;
+      }
+    }
+    return false;
+  }
+
+  function similarCompanyMatches(payload, excludeCompanyId = null) {
+    const draft = {
+      name: String(payload?.name || "").trim(),
+      shortName: String(payload?.shortName || "").trim(),
+      contactName: String(payload?.contactName || "").trim(),
+      phone: String(payload?.phone || "").trim(),
+      taxNo: String(payload?.taxNo || "").trim()
+    };
+    if (![draft.name, draft.shortName, draft.contactName, draft.phone, draft.taxNo].some(Boolean)) return [];
+    return (state.data?.companies || [])
+      .filter((company) => Number(company.id) !== Number(excludeCompanyId || 0))
+      .map((company) => {
+        const reasons = [];
+        if (textLooksSimilar(draft.name, company.name)) reasons.push("企业名称相似");
+        const draftShortName = comparableTextKey(draft.shortName);
+        const companyShortName = comparableTextKey(company.shortName);
+        if (draftShortName && companyShortName && (draftShortName === companyShortName || textLooksSimilar(draft.shortName, company.shortName))) reasons.push("简称相似");
+        if (draft.contactName && comparableTextKey(draft.contactName) === comparableTextKey(company.contactName)) reasons.push("联系人相同");
+        if (draft.phone && comparablePhoneKey(draft.phone) && comparablePhoneKey(draft.phone) === comparablePhoneKey(company.phone)) reasons.push("手机号相同");
+        if (draft.taxNo && comparableTaxKey(draft.taxNo) && comparableTaxKey(draft.taxNo) === comparableTaxKey(company.taxNo)) reasons.push("税号相同");
+        return { company, reasons };
+      })
+      .filter((item) => item.reasons.length)
+      .sort((a, b) => b.reasons.length - a.reasons.length)
+      .slice(0, 6);
+  }
+
+  function similarCompanyWarningHtml(payload, excludeCompanyId = null) {
+    const matches = similarCompanyMatches(payload, excludeCompanyId);
+    if (!matches.length) return "";
+    return `
+      <div class="similar-company-alert">
+        <strong>发现相似企业</strong>
+        <p>请确认是否为同一客户，避免重复录入或重复保护。</p>
+        <div class="similar-company-list">
+          ${matches.map(({ company, reasons }) => `
+            <div class="similar-company-row">
+              <button type="button" class="company-name-link" onclick="App.openCompanyDetail(${Number(company.id)})">${h(company.name || "-")}</button>
+              <span>${h(companyShortNameText(company))} · ${h(company.contactName || "-")} · ${h(company.phone || "-")}</span>
+              <div>${reasons.map((reason) => `<em>${h(reason)}</em>`).join("")}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
   }
 
   function eventNameById(eventId) {
@@ -800,12 +1308,6 @@ const App = (() => {
               <label>密码<input id="login-password" type="password" value="admin123" autocomplete="current-password"></label>
               <button type="submit">登录</button>
             </div>
-            <div class="demo-accounts">
-              <div><strong>演示账号</strong></div>
-              <div>超级管理员：admin / admin123</div>
-              <div>业务员：sales01 / sales123</div>
-              <div>企业账号：首款成交后在订单中生成</div>
-            </div>
           </form>
         </section>
       </div>
@@ -832,6 +1334,7 @@ const App = (() => {
         <main class="main">
           <header class="topbar">
             <h1>${h(title())}</h1>
+            ${globalSearchBox()}
             <div class="topbar-actions">
               <span>${unreadNoticeText()}</span>
               <button class="secondary" onclick="App.logout()">退出</button>
@@ -841,6 +1344,9 @@ const App = (() => {
             ${flashHtml()}
             ${viewHtml()}
             ${companyDetailModal()}
+            ${attachmentPreviewModal()}
+            ${state.paymentModalOrderId ? paymentModal() : ""}
+            ${state.changePickerOpen ? changeBoothModal() : ""}
             ${eventRoleModal()}
             ${eventCreateModal()}
           </div>
@@ -852,6 +1358,89 @@ const App = (() => {
   function unreadNoticeText() {
     const count = (state.data.notifications || []).filter((item) => !item.read).length;
     return count ? `${count} 条站内提醒` : "无未读提醒";
+  }
+
+  function globalSearchBox() {
+    if (!state.data || state.data.me.role === "enterprise") return "";
+    const query = state.globalSearchQuery || "";
+    const results = globalSearchResults(query);
+    const isOpen = state.globalSearchOpen && query.trim();
+    return `
+      <div class="global-search">
+        <input
+          id="global-search-input"
+          value="${h(query)}"
+          placeholder="搜索企业 / 订单 / 展位"
+          onfocus="App.openGlobalSearch()"
+          oninput="App.setGlobalSearch(this.value)"
+        >
+        ${query ? `<button type="button" class="global-search-clear" onclick="App.clearGlobalSearch()">×</button>` : ""}
+        ${isOpen ? `
+          <div class="global-search-panel">
+            ${results.length ? results.map(globalSearchResultRow).join("") : `<div class="global-search-empty">没有匹配结果</div>`}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  function globalSearchResultRow(result) {
+    return `
+      <button type="button" class="global-search-result" onmousedown="App.openGlobalSearchResult('${result.type}', ${Number(result.id)}); return false;">
+        <span class="global-search-type">${h(result.typeLabel)}</span>
+        <span class="global-search-main">${h(result.title)}</span>
+        <span class="global-search-sub">${h(result.subtitle)}</span>
+      </button>
+    `;
+  }
+
+  function globalSearchResults(query) {
+    const keyword = companyNameKey(query);
+    if (!keyword) return [];
+    const results = [];
+    const match = (...values) => values.some((value) => companyNameKey(value).includes(keyword));
+    const push = (item) => {
+      if (results.length < 12) results.push(item);
+    };
+
+    (state.data.companies || []).forEach((company) => {
+      if (!match(company.name, company.shortName, company.contactName, company.phone, company.taxNo)) return;
+      const lead = companyLead(company.id);
+      const orders = companyOrders(company.id);
+      push({
+        type: "company",
+        typeLabel: "企业",
+        id: company.id,
+        title: company.name || "-",
+        subtitle: `${companyShortNameText(company)} · ${customerLeadTypeText(lead)} · ${orders.length} 个订单`
+      });
+    });
+
+    (state.data.orders || []).forEach((order) => {
+      const company = getCompany(order.companyId);
+      const boothNos = orderBoothNos(order);
+      if (!match(order.orderNo, order.title, company.name, company.shortName, boothNos)) return;
+      push({
+        type: "order",
+        typeLabel: "订单",
+        id: order.id,
+        title: order.orderNo || "-",
+        subtitle: `${company.name || "-"} · ${typeText(order.type)} · ${boothNos || order.title || "-"} · ${orderDisplayStatusText(order)}`
+      });
+    });
+
+    (state.data.booths || []).forEach((booth) => {
+      if (!match(booth.boothNo, booth.hall, booth.zone, attrText(booth.attr), statusText(booth.status))) return;
+      push({
+        type: "booth",
+        typeLabel: "展位",
+        id: booth.id,
+        title: booth.boothNo || "-",
+        subtitle: `${booth.hall || "-"} · ${booth.zone || "-"} · ${attrText(booth.attr)} · ${statusText(booth.status)}`
+      });
+    });
+
+    return results;
   }
 
   function viewHtml() {
@@ -900,6 +1489,17 @@ const App = (() => {
 
   function customerTargetMode() {
     return state.data?.settings?.rules?.customerTargetMode === "department" ? "department" : "sales";
+  }
+
+  function enterpriseLinkDaysValue(rules = state.data?.settings?.rules || {}) {
+    const maxDays = eventCountdownDaysValue(state.data?.settings?.event);
+    if (!rules.enterpriseLinkDaysCustomized) return maxDays;
+    return clampEnterpriseLinkDaysValue(rules.enterpriseLinkDays, maxDays);
+  }
+
+  function clampEnterpriseLinkDaysValue(value, maxDays = eventCountdownDaysValue(state.data?.settings?.event)) {
+    const rawDays = Number(value || maxDays);
+    return Math.min(maxDays, Math.max(1, Number.isFinite(rawDays) ? rawDays : maxDays));
   }
 
   function salesTargetForUser(userId) {
@@ -964,7 +1564,7 @@ const App = (() => {
   }
 
   function unpaidBoothOrders(orders) {
-    return orders.filter((order) => Number(order.paidApprovedAmount || 0) <= 0);
+    return orders.filter((order) => order.status !== "sold" && Number(order.paidApprovedAmount || 0) <= 0);
   }
 
   function boothCountFromOrders(orders) {
@@ -977,6 +1577,155 @@ const App = (() => {
       return live || snapshot;
     });
     return boothEquivalentCount(booths);
+  }
+
+  function hoursUntil(value) {
+    const due = new Date(value || 0).getTime();
+    if (!Number.isFinite(due)) return Infinity;
+    return (due - Date.now()) / 3600000;
+  }
+
+  function isDueSoon(value, hours = 48) {
+    const left = hoursUntil(value);
+    return Number.isFinite(left) && left > 0 && left <= hours;
+  }
+
+  function orderWorkflowKind(order) {
+    const lead = orderLead(order);
+    const contractStatus = leadFileStatus(lead, "contract");
+    const voucherStatus = leadFileStatus(lead, "voucher");
+    if (!isActiveOrder(order)) return "closed";
+    if (order.status === "sold") return "sold";
+    if (salesFlowMode() === "contract_first") {
+      if (contractStatus === "pending") return "contract-pending";
+      if (contractStatus !== "approved") return "contract-missing";
+      if (voucherStatus === "pending" || hasPendingOrderPayment(order)) return "voucher-pending";
+      if (voucherStatus !== "approved" && !hasActiveOrderPayment(order)) return "voucher-missing";
+    } else {
+      if (voucherStatus === "pending" || hasPendingOrderPayment(order)) return "voucher-pending";
+      if (voucherStatus !== "approved" && !hasActiveOrderPayment(order)) return "voucher-missing";
+    }
+    if (Number(order.paidApprovedAmount || 0) > 0) return "paid";
+    return "reserved";
+  }
+
+  function exhibitorFilterLabel(filter) {
+    return {
+      "my": "我的客户",
+      "pending-contract": "未上传合同",
+      "contract-pending": "合同审核中",
+      "pending-voucher": "未上传水单",
+      "payment-review": "水单审核中",
+      "sold": "已成交",
+      "paid": "到款展位",
+      "unpaid": "未收款",
+      "soon-release": "即将释放",
+      "profile-missing": "企业资料未交",
+      "fascia-review": "楣板待审",
+      "rental-review": "展具待审"
+    }[filter] || "";
+  }
+
+  function filterOrdersByDrill(rows, filter) {
+    if (!filter) return rows;
+    return rows.filter((order) => {
+      const profile = state.data.profiles.find((item) => Number(item.orderId) === Number(order.id));
+      const kind = orderWorkflowKind(order);
+      if (filter === "my") return Number(order.salespersonId) === Number(state.data.me.id);
+      if (filter === "pending-contract") return kind === "contract-missing";
+      if (filter === "contract-pending") return kind === "contract-pending";
+      if (filter === "pending-voucher") return kind === "voucher-missing";
+      if (filter === "payment-review") return kind === "voucher-pending" || hasPendingOrderPayment(order);
+      if (filter === "sold") return order.status === "sold";
+      if (filter === "paid") return Number(order.paidApprovedAmount || 0) > 0;
+      if (filter === "unpaid") return Number(order.paidApprovedAmount || 0) <= 0;
+      if (filter === "soon-release") return isDueSoon(order.reserveExpiresAt, 48) && order.status !== "sold";
+      if (filter === "profile-missing") return order.status === "sold" && !profileComplete(profile);
+      if (filter === "fascia-review") return profile?.fascia?.status === "pending";
+      if (filter === "rental-review") return (profile?.rentals || []).some((rental) => rental.status === "pending");
+      return true;
+    });
+  }
+
+  function exhibitorAdvancedFilterBar(value, count) {
+    const options = [
+      ["", "全部参展企业"],
+      ["my", "我的客户"],
+      ["soon-release", "即将释放"],
+      ["pending-contract", "未传合同"],
+      ["contract-pending", "合同审核中"],
+      ["pending-voucher", "未传水单"],
+      ["payment-review", "水单审核中"],
+      ["sold", "已成交"],
+      ["profile-missing", "资料未提交"]
+    ];
+    return `
+      <div class="advanced-filter-bar">
+        <label>高级筛选
+          <select onchange="App.setExhibitorFilter(this.value)">
+            ${options.map(([key, label]) => `<option value="${key}" ${value === key ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        ${value ? `<button class="secondary" onclick="App.clearExhibitorFilter()">清除筛选</button>` : ""}
+        <span class="count-pill">${count} 条结果</span>
+      </div>
+    `;
+  }
+
+  function todoItems() {
+    const role = state.data.me.role;
+    const orders = state.data.orders || [];
+    const boothOrders = orders.filter((order) => order.type === "booth" && isActiveOrder(order));
+    const ownBoothOrders = isAdminLikeRole(role) ? boothOrders : boothOrders.filter((order) => Number(order.salespersonId) === Number(state.data.me.id));
+    const pendingContract = ownBoothOrders.filter((order) => orderWorkflowKind(order) === "contract-missing");
+    const pendingVoucher = ownBoothOrders.filter((order) => orderWorkflowKind(order) === "voucher-missing");
+    const soonRelease = ownBoothOrders.filter((order) => order.status !== "sold" && isDueSoon(order.reserveExpiresAt, 48));
+    const profileMissing = orders.filter((order) => order.type === "booth" && order.status === "sold" && !profileComplete(state.data.profiles.find((profile) => Number(profile.orderId) === Number(order.id))));
+    const pendingReviewCount = (state.data.customerLeads || []).filter((lead) => lead.contractReviewStatus === "pending" || lead.voucherReviewStatus === "pending").length
+      + (state.data.payments || []).filter((payment) => payment.status === "pending").length
+      + (state.data.changeRequests || []).filter((request) => request.status === "pending").length;
+    const fasciaPending = (state.data.profiles || []).filter((profile) => profile.fascia?.status === "pending").length;
+    const rentalPending = (state.data.profiles || []).reduce((sum, profile) => sum + (profile.rentals || []).filter((rental) => rental.status === "pending").length, 0);
+    const items = [];
+    if (role === "sales") {
+      items.push({ key: "pending-contract", title: "待上传合同", count: pendingContract.length, tone: "warning" });
+      items.push({ key: "pending-voucher", title: "待上传水单", count: pendingVoucher.length, tone: "warning" });
+      items.push({ key: "soon-release", title: "即将释放", count: soonRelease.length, tone: "danger" });
+    }
+    if (isAdminLikeRole(role)) {
+      items.push({ key: "approval", title: "待审核", count: pendingReviewCount, tone: "warning" });
+      items.push({ key: "fascia-review", title: "楣板待审", count: fasciaPending, tone: "warning" });
+      items.push({ key: "rental-review", title: "展具待审", count: rentalPending, tone: "warning" });
+    }
+    if (role !== "enterprise") {
+      items.push({ key: "profile-missing", title: "企业资料未交", count: profileMissing.length, tone: "normal" });
+    }
+    if (role === "enterprise") {
+      const profile = state.data.profiles.find((item) => Number(item.orderId) === Number(state.data.me.orderId));
+      items.push({ key: "enterprise-profile", title: "会刊/证件待补", count: profileComplete(profile) ? 0 : 1, tone: "warning" });
+    }
+    return items;
+  }
+
+  function todoWorkbenchHtml() {
+    const items = todoItems();
+    return `
+      <section class="section todo-workbench">
+        <div class="section-title-row">
+          <h2>待办工作台</h2>
+          <span class="count-pill">${items.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项待办</span>
+        </div>
+        <div class="todo-grid">
+          ${items.map((item) => `
+            <button type="button" class="todo-card ${h(item.tone)}" onclick="App.openTodoTarget('${h(item.key)}')">
+              <span>${h(item.title)}</span>
+              <strong>${formatCount(item.count)}</strong>
+              <small>${Number(item.count || 0) ? "点击处理" : "暂无待办"}</small>
+            </button>
+          `).join("")}
+        </div>
+      </section>
+    `;
   }
 
   function formatCount(value) {
@@ -1021,6 +1770,13 @@ const App = (() => {
     const end = localDate(event?.endDate, true);
     if (end && now.getTime() <= end.getTime()) return "展会进行中";
     return "已结束";
+  }
+
+  function eventCountdownDaysValue(event = state.data?.settings?.event) {
+    const start = localDate(event?.startDate);
+    if (!start) return Math.max(1, Number(state.data?.settings?.rules?.reserveWorkdays || 7));
+    const diff = start.getTime() - Date.now();
+    return diff > 0 ? Math.max(1, Math.ceil(diff / 86400000)) : 1;
   }
 
   function boothStatsFor(booths) {
@@ -1187,15 +1943,16 @@ const App = (() => {
           <strong>${h(eventCountdownText(event))}</strong>
         </div>
       </section>
+      ${todoWorkbenchHtml()}
       <div class="cards">
         ${metric("展位总量", `${formatCount(m.totalBooths)}个`)}
-        ${metric("已预定展位", `${formatCount(m.reservedBooths)}个`, `占总展位 ${percentText(m.reservedBooths, m.totalBooths)}`)}
-        ${metric("到款展位", `${formatCount(m.paidBooths)}个`, `占总展位 ${percentText(m.paidBooths, m.totalBooths)}`)}
-        ${metric("已收款", money(m.paidAmount), `回款率 ${percentText(m.paidAmount, m.totalAmount)}`)}
+        ${metric("已预定展位", `${formatCount(m.reservedBooths)}个`, `占总展位 ${percentText(m.reservedBooths, m.totalBooths)}`, "App.openDashboardDrill('unpaid')")}
+        ${metric("到款展位", `${formatCount(m.paidBooths)}个`, `占总展位 ${percentText(m.paidBooths, m.totalBooths)}`, "App.openDashboardDrill('paid')")}
+        ${metric("已收款", money(m.paidAmount), `回款率 ${percentText(m.paidAmount, m.totalAmount)}`, "App.openDashboardDrill('paid')")}
         ${metric("合计面积", `${formatCount(m.totalArea)}㎡`)}
         ${metric("标摊数量", `${m.standardCount}个`)}
         ${metric("光地面积", `${formatCount(m.rawArea)}㎡`)}
-        ${metric("未收款金额", money(m.unpaidAmount))}
+        ${metric("未收款金额", money(m.unpaidAmount), "", "App.openDashboardDrill('unpaid')")}
       </div>
       <section class="dashboard-hero">
         <div class="sales-overview">
@@ -1537,10 +2294,12 @@ const App = (() => {
   }
 
   function leadOwnerText(lead) {
-    return getUser(lead.ownerSalesId)?.displayName || "-";
+    const ownerId = lead?.status === "public" ? (lead.ownerSalesId || lead.previousOwnerSalesId) : lead?.ownerSalesId;
+    return getUser(ownerId)?.displayName || "-";
   }
 
   function customerContactText(company) {
+    if (company?.contactMasked) return "联系方式已隐藏";
     return company?.contactName || "-";
   }
 
@@ -1549,6 +2308,56 @@ const App = (() => {
       Number(order.companyId) === Number(companyId)
       && isActiveOrder(order)
     ));
+  }
+
+  function customerAdvancedOptions() {
+    return [
+      ["", "全部客户"],
+      ["my", "我的客户"],
+      ["soon-release", "即将释放"],
+      ["pending-contract", "未传合同"],
+      ["contract-pending", "合同审核中"],
+      ["pending-voucher", "未传水单"],
+      ["sold", "已成交"],
+      ["profile-missing", "资料未提交"]
+    ];
+  }
+
+  function leadMatchesAdvancedFilter(lead, filter) {
+    if (!filter) return true;
+    const order = activeOrderForCompany(lead.companyId);
+    const profile = order ? state.data.profiles.find((item) => Number(item.orderId) === Number(order.id)) : null;
+    const kind = order ? orderWorkflowKind(order) : "";
+    if (filter === "my") {
+      return Number(lead.ownerSalesId) === Number(state.data.me.id) || (order && Number(order.salespersonId) === Number(state.data.me.id));
+    }
+    if (filter === "soon-release") {
+      return isDueSoon(lead.protectedUntil, 48) || (order && order.status !== "sold" && isDueSoon(order.reserveExpiresAt, 48));
+    }
+    if (filter === "pending-contract") {
+      return kind === "contract-missing" || (!order && salesFlowMode() === "contract_first" && leadFileStatus(lead, "contract") === "none");
+    }
+    if (filter === "contract-pending") return leadFileStatus(lead, "contract") === "pending";
+    if (filter === "pending-voucher") {
+      return kind === "voucher-missing" || (!order && salesFlowMode() !== "contract_first" && leadFileStatus(lead, "voucher") === "none");
+    }
+    if (filter === "sold") return order?.status === "sold" || lead.status === "converted";
+    if (filter === "profile-missing") return order?.status === "sold" && !profileComplete(profile);
+    return true;
+  }
+
+  function customerAdvancedFilterBar(value, stateKey, count) {
+    return `
+      <div class="advanced-filter-bar">
+        <label>高级筛选
+          <select onchange="App.setCustomerFilter('${stateKey}', this.value)">
+            ${customerAdvancedOptions().map(([key, label]) => `<option value="${key}" ${value === key ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        ${value ? `<button class="secondary" onclick="App.setCustomerFilter('${stateKey}', '')">清除筛选</button>` : ""}
+        <span class="count-pill">${count} 条结果</span>
+      </div>
+    `;
   }
 
   function customerReleaseAction(lead) {
@@ -1659,6 +2468,8 @@ const App = (() => {
   }
 
   function leadUploadButtons(lead) {
+    const contractAttachment = leadLatestAttachment(lead, "contract");
+    const voucherAttachment = leadLatestAttachment(lead, "voucher");
     const voucherButton = leadCanUploadVoucher(lead)
       ? `<label class="tiny secondary file-upload-button">水单<input id="lead-voucher-${lead.id}" type="file" accept="${contractVoucherAccept}" onchange="App.uploadLeadAttachment(${lead.id}, 'voucher')"></label>`
       : `<button class="tiny secondary" disabled title="合同审核通过后才能上传水单">水单</button>`;
@@ -1666,6 +2477,10 @@ const App = (() => {
       <label class="tiny secondary file-upload-button">合同<input id="lead-contract-${lead.id}" type="file" accept="${contractVoucherAccept}" onchange="App.uploadLeadAttachment(${lead.id}, 'contract')"></label>
       ${voucherButton}
       <div class="hint">合同：${h(statusText(leadFileStatus(lead, "contract")))} · 水单：${h(statusText(leadFileStatus(lead, "voucher")))}${lead.voucherDueAt ? ` · 水单期限：${h(date(lead.voucherDueAt))}` : ""}</div>
+      <div class="attachment-preview-list">
+        ${contractAttachment ? attachmentPreviewButton(contractAttachment.id, "预览合同") : ""}
+        ${voucherAttachment ? attachmentPreviewButton(voucherAttachment.id, "预览水单") : ""}
+      </div>
     `;
   }
 
@@ -1689,6 +2504,7 @@ const App = (() => {
   function customerModal() {
     if (!state.customerModalOpen) return "";
     const draft = state.customerDraft;
+    const similarityInput = `oninput="App.refreshCompanySimilarity('cust')"`;
     const salesOptions = state.data.users
       .filter((user) => user.role === "sales")
       .map((user) => `<option value="${user.id}" ${String(draft.ownerSalesId) === String(user.id) ? "selected" : ""}>${h(user.displayName)}</option>`)
@@ -1701,10 +2517,10 @@ const App = (() => {
             <button class="secondary" onclick="App.closeCustomerModal()">关闭</button>
           </header>
           <div class="grid two">
-            <label>${requiredLabel("企业名称")}<input id="cust-name" value="${h(draft.name)}" required></label>
-            <label>企业简称<input id="cust-short-name" value="${h(draft.shortName || "")}"></label>
-            <label>联系人<input id="cust-contact" value="${h(draft.contactName)}"></label>
-            <label>手机号<input id="cust-phone" value="${h(draft.phone)}"></label>
+            <label>${requiredLabel("企业名称")}<input id="cust-name" value="${h(draft.name)}" ${similarityInput} required></label>
+            <label>企业简称<input id="cust-short-name" value="${h(draft.shortName || "")}" ${similarityInput}></label>
+            <label>联系人<input id="cust-contact" value="${h(draft.contactName)}" ${similarityInput}></label>
+            <label>手机号<input id="cust-phone" value="${h(draft.phone)}" ${similarityInput}></label>
             <label>邮箱<input id="cust-email" value="${h(draft.email)}"></label>
             ${isAdminLikeRole(state.data.me.role) ? `<label>保护业务员<select id="cust-owner">${salesOptions}</select></label>` : ""}
             <label>企业所在地<select id="cust-location-type" onchange="App.customerLocationTypeChanged()">
@@ -1718,8 +2534,9 @@ const App = (() => {
               <label>市<select id="cust-city">${cityOptions(draft.province || "广东省", draft.city || "广州市")}</select></label>
             `}
             <label>地址<input id="cust-address" value="${h(draft.address)}"></label>
-            <label>税号<input id="cust-tax" value="${h(draft.taxNo)}"></label>
+            <label>税号<input id="cust-tax" value="${h(draft.taxNo)}" ${similarityInput}></label>
           </div>
+          <div id="cust-similar-hints">${similarCompanyWarningHtml(draft)}</div>
           <div class="split-actions" style="margin-top:14px">
             <button onclick="App.saveNewCustomer()">保存客户</button>
           </div>
@@ -1744,7 +2561,7 @@ const App = (() => {
   }
 
   function viewNewCustomers() {
-    const rows = leadRows("new", "protected");
+    const rows = leadRows("new", "protected").filter((lead) => leadMatchesAdvancedFilter(lead, state.newCustomerFilter));
     const action = (lead) => customerReleaseAction(lead);
     return `
       <section class="section">
@@ -1754,6 +2571,7 @@ const App = (() => {
         </div>
         ${customerQuotaSummaryHtml()}
         <div class="split-actions" style="margin-bottom:14px"><button onclick="App.openCustomerModal()">新增客户</button></div>
+        ${customerAdvancedFilterBar(state.newCustomerFilter, "newCustomerFilter", rows.length)}
         <div class="table-wrap">
           <table class="customer-table">
             <thead><tr><th>企业名称</th><th>企业简称</th><th>客户信息</th><th>保护人</th><th>保护倒计时</th><th>操作</th></tr></thead>
@@ -1811,7 +2629,7 @@ const App = (() => {
   }
 
   function viewOldCustomers() {
-    const rows = leadRows("old", "protected");
+    const rows = leadRows("old", "protected").filter((lead) => leadMatchesAdvancedFilter(lead, state.oldCustomerFilter));
     const event = state.data.settings.event || {};
     return `
       <section class="section">
@@ -1820,6 +2638,7 @@ const App = (() => {
           <span class="count-pill">${rows.length} 家</span>
         </div>
         ${event.linkedEventId ? `<p class="hint">当前关联历史展会：${h(eventNameById(event.linkedEventId))}</p>` : `<div class="empty">当前展会尚未关联历史展会，请管理员先到“展会信息”设置。</div>`}
+        ${customerAdvancedFilterBar(state.oldCustomerFilter, "oldCustomerFilter", rows.length)}
         <div class="table-wrap">
           <table class="customer-table">
             <thead><tr><th>企业名称</th><th>企业简称</th><th>客户信息</th><th>保护人</th><th>保护倒计时</th><th>历史成交</th></tr></thead>
@@ -1882,8 +2701,9 @@ const App = (() => {
     `;
   }
 
-  function metric(label, value) {
-    return `<div class="metric"><span>${h(label)}</span><strong>${h(value)}</strong>${arguments[2] ? `<small>${h(arguments[2])}</small>` : ""}</div>`;
+  function metric(label, value, subtext = "", action = "") {
+    const attrs = action ? ` role="button" tabindex="0" onclick="${action}" onkeydown="if(event.key==='Enter'){${action}}"` : "";
+    return `<div class="metric ${action ? "clickable" : ""}"${attrs}><span>${h(label)}</span><strong>${h(value)}</strong>${subtext ? `<small>${h(subtext)}</small>` : ""}</div>`;
   }
 
   function progressLine(label, percent, value) {
@@ -1954,14 +2774,16 @@ const App = (() => {
   function viewSalesBoothMap() {
     const zones = zoneList();
     const booths = filteredSalesMapBooths();
+    const matchedBooths = salesMapMatchedBooths();
     const availableCount = state.data.booths.filter((booth) => booth.status === "available").length;
     const reservedCount = state.data.booths.filter((booth) => booth.status === "reserved").length;
     const soldCount = state.data.booths.filter((booth) => booth.status === "sold").length;
+    const countText = state.salesMapStatus ? `${matchedBooths.length} 个匹配 / ${booths.length} 个显示` : `${booths.length} / ${state.data.booths.length} 个展位`;
     return `
       <section class="section">
         <div class="section-title-row">
           <h2>销售展位图</h2>
-          <span class="count-pill">${booths.length} / ${state.data.booths.length} 个展位</span>
+          <span class="count-pill">${countText}</span>
         </div>
         <div class="sales-map-summary">
           <div><strong>${availableCount}</strong><span>可选展位</span></div>
@@ -2008,9 +2830,18 @@ const App = (() => {
     return state.data.booths.filter((booth) => {
       if (state.salesMapZone && booth.zone !== state.salesMapZone) return false;
       if (state.salesMapAttr && booth.attr !== state.salesMapAttr) return false;
-      if (state.salesMapStatus && booth.status !== state.salesMapStatus) return false;
       return true;
     });
+  }
+
+  function salesMapMatchedBooths() {
+    return filteredSalesMapBooths().filter((booth) => !state.salesMapStatus || booth.status === state.salesMapStatus);
+  }
+
+  function salesMapBoothDimmed(booth) {
+    if (state.salesMapStatus && booth.status !== state.salesMapStatus) return true;
+    if (state.salesMapOnlyAvailable && booth.status !== "available") return true;
+    return false;
   }
 
   function salesBoothMapSvg(booths) {
@@ -2024,7 +2855,7 @@ const App = (() => {
       if (!boothIds.has(booth.id)) return "";
       const focused = state.salesMapFocusId === booth.id;
       const available = booth.status === "available";
-      const grayed = state.salesMapOnlyAvailable && !available;
+      const grayed = salesMapBoothDimmed(booth);
       const fill = grayed ? "#c9d1dc" : zoneColor(booth.zone);
       const textVisible = booth.width >= 32 && booth.height >= 22;
       return `
@@ -2072,6 +2903,7 @@ const App = (() => {
   }
 
   function salesBoothTooltip(booth) {
+    const order = activeOrderForBooth(booth);
     const lines = [
       `展位号：${booth.boothNo}`,
       `所在展馆：${booth.hall || "-"}`,
@@ -2080,7 +2912,7 @@ const App = (() => {
       `计价面积：${Number(booth.billableArea || booth.area || 0)}㎡`,
       `障碍面积：${Number(booth.obstacleArea || 0)}㎡`,
       `展位价格：${money(booth.price)}`,
-      `展位状态：${statusText(booth.status)}`
+      `展位状态：${order ? orderDisplayStatusText(order) : statusText(booth.status)}`
     ];
     const countdown = reserveCountdown(booth);
     if (countdown) lines.push(`预留倒计时：${countdown}`);
@@ -2117,6 +2949,9 @@ const App = (() => {
       <label>比例尺 像素/米<input id="map-scale" type="number" value="${mapScale()}" min="1"></label>
       <button class="secondary" onclick="App.saveMapScale()">保存比例尺</button>
       <button class="${state.drawMode ? "success" : "secondary"}" onclick="App.toggleDraw()">${state.drawMode ? "绘制模式中" : "开启绘制"}</button>
+      <button class="secondary" ${state.mapUndoStack.length ? "" : "disabled"} onclick="App.undoMapEdit()">撤销</button>
+      <button class="secondary" ${state.mapRedoStack.length ? "" : "disabled"} onclick="App.redoMapEdit()">重做</button>
+      <button class="secondary" ${state.mapUndoStack.length ? "" : "disabled"} onclick="App.undoMapEdit()">误删恢复</button>
       <label>障碍形状<select id="obstacle-shape-mode" onchange="App.setObstacleShape(this.value)">
         <option value="rect" ${state.obstacleShape !== "circle" ? "selected" : ""}>矩形</option>
         <option value="circle" ${state.obstacleShape === "circle" ? "selected" : ""}>圆形</option>
@@ -2198,8 +3033,9 @@ const App = (() => {
       const textVisible = booth.width >= 32 && booth.height >= 22;
       return `
         <g data-booth-id="${booth.id}" onclick="App.boothClick(event, ${booth.id})">
-          <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${base ? "base" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
+          <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${base ? "base" : ""} ${booth.locked ? "locked" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
           ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
+          ${booth.locked ? `<text class="booth-lock-text" x="${booth.x + Number(booth.width || 0) - 8}" y="${booth.y + 12}">锁</text>` : ""}
         </g>
       `;
     }).join("");
@@ -2245,6 +3081,7 @@ const App = (() => {
         </div>
         <div class="split-actions" style="margin-top:12px">
           <button onclick="App.saveBooth()">保存展位</button>
+          <button class="secondary" onclick="App.toggleBoothLock(${booth.id})">${booth.locked ? "解锁展位" : "锁定展位"}</button>
           <button class="secondary" onclick="App.toggleSelected(${booth.id})">加入/移出批量</button>
           <button class="danger" onclick="App.deleteBooth(${booth.id})">删除展位</button>
         </div>
@@ -2262,6 +3099,7 @@ const App = (() => {
         <button class="secondary" onclick="App.alignSelectedBooths('y')">按 Y 轴对齐</button>
         <button class="secondary" onclick="App.attachSelectedBooths('x')">沿 X 轴对齐并贴合</button>
         <button class="secondary" onclick="App.attachSelectedBooths('y')">沿 Y 轴对齐并贴合</button>
+        <button class="secondary" onclick="App.copySelectedBooths()">批量复制</button>
         <button class="danger" onclick="App.deleteSelectedBooths()">删除选中展位</button>
         <button class="secondary" onclick="App.clearBoothSelection()">清空批量</button>
       </div>
@@ -2359,12 +3197,12 @@ const App = (() => {
             <option value="workday" ${deadlineDayMode === "workday" ? "selected" : ""}>工作日</option>
             <option value="natural" ${deadlineDayMode === "natural" ? "selected" : ""}>自然日</option>
           </select></label>
-          <label>预留有效天数（${deadlineDayModeText}）<input id="rule-workdays" type="number" value="${rules.reserveWorkdays || 7}"></label>
+          <label>预留有效天数（${deadlineDayModeText}）<input id="rule-workdays" type="number" value="${rules.reserveWorkdays ?? 7}"></label>
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>释放前提醒天数<input id="rule-notice" type="number" value="${rules.noticeDaysBeforeRelease}"></label>
-          <label>新客户保护天数<input id="rule-new-customer-days" type="number" value="${rules.newCustomerProtectDays || 30}"></label>
-          <label>老客户保护天数<input id="rule-old-customer-days" type="number" value="${rules.oldCustomerProtectDays || 30}"></label>
+          <label>新客户保护天数<input id="rule-new-customer-days" type="number" value="${rules.newCustomerProtectDays ?? 30}"></label>
+          <label>老客户保护天数<input id="rule-old-customer-days" type="number" value="${rules.oldCustomerProtectDays ?? 30}"></label>
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>销售流程<select id="rule-sales-flow" onchange="App.salesFlowRuleChanged()">
@@ -2374,6 +3212,11 @@ const App = (() => {
           ${rules.salesFlowMode === "contract_first" ? `<label>合同通过后上传水单期限（${deadlineDayModeText}）<input id="rule-contract-voucher-workdays" type="number" min="0" value="${rules.contractApprovedVoucherWorkdays ?? rules.reserveWorkdays ?? 7}"></label>` : ""}
         </div>
         <p class="hint">直接水单模式以到账为优先，业务员可先上传水单；合同先审模式会要求合同审核通过后，在设定期限内上传水单。两个期限都从实际操作时刻开始计算。</p>
+        <div class="grid two compact-grid" style="margin-top:14px">
+          <label>企业免登录链接有效天数<input id="rule-enterprise-link-days" type="number" min="1" max="${eventCountdownDaysValue()}" value="${enterpriseLinkDaysValue(rules)}" onchange="App.salesFlowRuleChanged()"></label>
+          <div class="hint">默认与展会倒计时一致，当前最多 ${eventCountdownDaysValue()} 天；管理员可单独缩短，但不能超过展会倒计时。</div>
+          <label>审核驳回原因模板<textarea id="review-reject-templates" placeholder="每行一个模板">${h((state.data.settings.reviewRejectTemplates || []).join("\n"))}</textarea></label>
+        </div>
         <div class="split-actions" style="margin-top:14px">
           <button onclick="App.saveSettings()">保存规则</button>
           <button class="secondary" onclick="App.runReleaseJob()">立即执行释放检查</button>
@@ -2691,6 +3534,7 @@ const App = (() => {
     const partialPaidText = orderPartialPaidText(order);
 
     if (orderFullyPaid(order)) return workflowBadge("已全款", "sold");
+    if (orderSpecialApproved(order)) return workflowBadge(partialPaidText ? `特殊成交 · ${partialPaidText}` : "特殊成交 · 未到款", "sold");
     if (order.status === "sold") return workflowBadge(partialPaidText || "已首款成交", "sold");
     if (salesFlowMode() === "contract_first") {
       if (contractStatus === "pending") {
@@ -2727,9 +3571,11 @@ const App = (() => {
     return `
       <div class="action-buttons">
         ${orderPrimaryUploadAction(order, canOperate)}
+        ${specialOrderActionButton(order, canOperate)}
         ${canOperate && order.type === "booth" ? `<button class="tiny secondary" onclick="App.openChangeBoothPicker(${order.id})">更换展位</button>` : ""}
         ${canOperate && order.type === "booth" ? `<button class="tiny danger" onclick="App.requestCancelOrder(${order.id})">退订展位</button>` : ""}
         ${canIssue ? `<button class="tiny secondary" onclick="App.issueEnterpriseAccount(${order.id})">企业账号</button>` : ""}
+        ${canIssue ? `<button class="tiny secondary" onclick="App.issueEnterpriseLink(${order.id})">免登录链接</button>` : ""}
       </div>
       ${pendingChangeSummary(order.id)}
     `;
@@ -2750,6 +3596,34 @@ const App = (() => {
     const canUploadPayment = canUploadPaymentForOrder(order);
     const paymentBlockReason = canUploadPayment ? "" : uploadPaymentBlockReason(order);
     return `<button class="tiny" ${canUploadPayment ? `onclick="App.openPaymentModal(${order.id})"` : `disabled title="${h(paymentBlockReason)}"`}>上传水单</button>`;
+  }
+
+  function pendingSpecialOrderRequest(orderId) {
+    return (state.data.changeRequests || []).find((request) => (
+      Number(request.orderId) === Number(orderId)
+      && request.status === "pending"
+      && request.changeData?.action === "special_order"
+    ));
+  }
+
+  function canRequestSpecialOrder(order, canOperate = true) {
+    return Boolean(
+      canOperate
+      && state.data.me.role === "sales"
+      && order
+      && isActiveOrder(order)
+      && order.status !== "sold"
+      && !orderSpecialApproved(order)
+      && !orderFullyPaid(order)
+      && Number(order.totalAmount || 0) > 0
+      && !pendingSpecialOrderRequest(order.id)
+    );
+  }
+
+  function specialOrderActionButton(order, canOperate) {
+    if (pendingSpecialOrderRequest(order.id)) return `<button class="tiny secondary" disabled title="特殊订单申请审核中">特殊审核中</button>`;
+    if (!canRequestSpecialOrder(order, canOperate)) return "";
+    return `<button class="tiny secondary" onclick="App.requestSpecialOrder(${order.id})">特殊订单</button>`;
   }
 
   function uploadPaymentBlockReason(order) {
@@ -2794,6 +3668,7 @@ const App = (() => {
           </div>
           <div class="split-actions" style="margin-top:14px">
             <button onclick="App.submitPayment(${order.id})">提交管理员审核</button>
+            ${specialOrderActionButton(order, state.data.me.role === "sales" && isActiveOrder(order))}
             <button class="secondary" onclick="App.closePaymentModal()">取消</button>
           </div>
         </section>
@@ -3083,7 +3958,7 @@ const App = (() => {
   function paymentApprovalRow(payment) {
     const order = state.data.orders.find((item) => item.id === payment.orderId) || {};
     const company = getCompany(order.companyId);
-    const link = payment.voucherAttachmentId ? `<a class="attachment-link" target="_blank" href="${fileUrl(payment.voucherAttachmentId)}">查看水单</a>` : "无附件";
+    const link = payment.voucherAttachmentId ? attachmentPreviewButton(payment.voucherAttachmentId, "预览水单") : "无附件";
     return `
       <tr>
         <td><strong>${h(order.orderNo)}</strong><div class="hint">${h(company.name)}</div></td>
@@ -3102,7 +3977,7 @@ const App = (() => {
     const owner = getUser(lead.ownerSalesId);
     const attachment = leadLatestAttachment(lead, type);
     const label = type === "contract" ? "合同" : "水单";
-    const link = attachment ? `<a class="attachment-link" target="_blank" href="${fileUrl(attachment.id)}">查看${label}</a>` : "无附件";
+    const link = attachment ? attachmentPreviewButton(attachment.id, `预览${label}`) : "无附件";
     const flowHint = type === "voucher" && salesFlowMode() === "contract_first"
       ? `<div class="hint">合同状态：${h(statusText(leadFileStatus(lead, "contract")))}</div>`
       : "";
@@ -3166,15 +4041,21 @@ const App = (() => {
   }
 
   function viewExhibitorList() {
-    const rows = state.data.orders
+    const allRows = state.data.orders
       .filter((order) => order.type === "booth" && isActiveOrder(order))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const rows = filterOrdersByDrill(allRows, state.exhibitorFilter);
+    const filterLabel = exhibitorFilterLabel(state.exhibitorFilter);
     return `
       <section class="section">
         <div class="section-title-row">
           <h2>参展企业列表</h2>
-          <span class="count-pill">${rows.length} 家参展企业</span>
+          <div class="event-role-actions">
+            ${filterLabel ? `<span class="count-pill">筛选：${h(filterLabel)}</span>` : ""}
+            <span class="count-pill">${rows.length} 家参展企业</span>
+          </div>
         </div>
+        ${exhibitorAdvancedFilterBar(state.exhibitorFilter, rows.length)}
         <div class="table-wrap">
           <table>
             <thead><tr><th>企业名称</th><th>企业简称</th><th>展位</th><th>面积</th><th>业务员</th><th>已收款</th><th>预留展位倒计时</th><th>展务资料</th><th>操作</th></tr></thead>
@@ -3206,8 +4087,6 @@ const App = (() => {
           </table>
         </div>
       </section>
-      ${state.paymentModalOrderId ? paymentModal() : ""}
-      ${state.changePickerOpen ? changeBoothModal() : ""}
     `;
   }
 
@@ -3233,7 +4112,12 @@ const App = (() => {
                     <td>${profile ? profile.badges.length : 0} 人</td>
                     <td>${profile ? statusBadge(profile.fascia.status) : "-"}</td>
                     <td>${profile ? profile.rentals.length : 0} 项</td>
-                    <td>${!user ? `<button onclick="App.issueEnterpriseAccount(${order.id})">生成账号</button>` : `<button class="secondary" onclick="App.issueEnterpriseAccount(${order.id})">重置密码</button>`}</td>
+                    <td>
+                      <div class="action-buttons">
+                        ${!user ? `<button onclick="App.issueEnterpriseAccount(${order.id})">生成账号</button>` : `<button class="secondary" onclick="App.issueEnterpriseAccount(${order.id})">重置密码</button>`}
+                        <button class="secondary" onclick="App.issueEnterpriseLink(${order.id})">免登录链接</button>
+                      </div>
+                    </td>
                   </tr>
                 `;
               }).join("") || `<tr><td colspan="8" class="empty">暂无首款成交展位订单</td></tr>`}
@@ -3366,6 +4250,10 @@ const App = (() => {
           <label>宣传视频<input id="catalog-video" type="file" accept="video/*"></label>
           <label>产品图片<input id="catalog-image" type="file" accept="image/*"></label>
         </div>
+        <div class="attachment-preview-list">
+          ${profile.catalog?.videoAttachmentId ? `<div class="compact-item"><strong>已上传宣传视频</strong>${attachmentPreviewButton(profile.catalog.videoAttachmentId, "预览视频")}</div>` : `<div class="hint">暂未上传宣传视频</div>`}
+          ${(profile.catalog?.productImageIds || []).map((id, index) => `<div class="compact-item"><strong>产品图片 ${index + 1}</strong>${attachmentPreviewButton(id, "预览图片")}</div>`).join("")}
+        </div>
         <div class="split-actions" style="margin-top:14px"><button onclick="App.saveCatalog()">保存会刊信息</button></div>
       </section>
       <section class="section">
@@ -3378,7 +4266,15 @@ const App = (() => {
         </div>
         <div class="split-actions" style="margin-top:14px"><button onclick="App.addBadge()">添加参展证</button></div>
         <div class="compact-list" style="margin-top:14px">
-          ${profile.badges.map((badge) => `<div class="compact-item"><strong>${h(badge.name)}</strong><div class="hint">${h(badge.phone)} · ${h(badge.title)} · ${h(badge.idNo)}</div></div>`).join("") || `<div class="empty">暂无参展证</div>`}
+          ${profile.badges.map((badge) => `
+            <div class="compact-item">
+              <div class="compact-item-head">
+                <strong>${h(badge.name)}</strong>
+                <button class="tiny danger" onclick="App.deleteBadge('${h(badge.id)}')">删除</button>
+              </div>
+              <div class="hint">${h(badge.phone)} · ${h(badge.title)} · ${h(badge.idNo)}</div>
+            </div>
+          `).join("") || `<div class="empty">暂无参展证</div>`}
         </div>
       </section>
       <section class="section">
@@ -3406,7 +4302,15 @@ const App = (() => {
         </div>
         <div class="split-actions" style="margin-top:14px"><button onclick="App.submitRental()">提交增租申请</button></div>
         <div class="compact-list" style="margin-top:14px">
-          ${profile.rentals.map((rental) => `<div class="compact-item"><strong>${h(rental.furnitureName)} x ${rental.qty}</strong><div class="hint">${statusText(rental.status)} ${h(rental.reviewRemark || "")}</div></div>`).join("") || `<div class="empty">暂无展具申请</div>`}
+          ${profile.rentals.map((rental) => `
+            <div class="compact-item">
+              <div class="compact-item-head">
+                <strong>${h(rental.furnitureName)} x ${rental.qty}</strong>
+                <button class="tiny danger" onclick="App.deleteRental('${h(rental.id)}')">删除</button>
+              </div>
+              <div class="hint">${statusText(rental.status)} ${h(rental.reviewRemark || "")}</div>
+            </div>
+          `).join("") || `<div class="empty">暂无展具申请</div>`}
         </div>
       </section>
     `;
@@ -3457,7 +4361,7 @@ const App = (() => {
   function selectedAvailableBooths() {
     return [...state.selectedBoothIds]
       .map((id) => state.data.booths.find((booth) => booth.id === id))
-      .filter((booth) => booth && booth.status === "available");
+      .filter((booth) => booth && booth.status === "available" && !booth.locked);
   }
 
   function clampRectToMap(rect) {
@@ -3747,8 +4651,7 @@ const App = (() => {
       const y = Number(booth.y || 0);
       const boothWidth = Number(booth.width || 0);
       const boothHeight = Number(booth.height || 0);
-      const available = booth.status === "available";
-      const grayed = state.salesMapOnlyAvailable && !available;
+      const grayed = salesMapBoothDimmed(booth);
       drawRoundedRect(ctx, x, y, boothWidth, boothHeight, 2);
       ctx.fillStyle = grayed ? "#c9d1dc" : zoneColor(booth.zone);
       ctx.fill();
@@ -3797,9 +4700,13 @@ const App = (() => {
 
   function reviewRemarkPayload(status, label) {
     if (status !== "rejected") return { status };
-    const remark = window.prompt(`${label}不通过原因（必填）`);
+    const templates = state.data?.settings?.reviewRejectTemplates || ["合同未盖章", "金额不一致", "水单不清晰", "企业名称不一致"];
+    const templateText = templates.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    const remark = window.prompt(`${label}不通过原因（必填）\n可输入编号套用模板，或直接输入原因：\n${templateText}`);
     if (remark === null) return null;
-    const reviewRemark = remark.trim();
+    const trimmed = remark.trim();
+    const selectedTemplate = templates[Number(trimmed) - 1];
+    const reviewRemark = selectedTemplate || trimmed;
     if (!reviewRemark) {
       state.error = "审核不通过时必须填写原因";
       render();
@@ -3810,6 +4717,27 @@ const App = (() => {
 
   return {
     async init() {
+      const enterpriseToken = new URLSearchParams(window.location.search).get("enterpriseToken");
+      if (enterpriseToken) {
+        try {
+          const result = await api("/api/auth/enterprise-link", {
+            method: "POST",
+            body: { token: enterpriseToken }
+          });
+          state.token = result.token;
+          localStorage.setItem("expoToken", state.token);
+          window.history.replaceState({}, "", window.location.pathname);
+          await refresh();
+          state.view = "enterprise";
+          render();
+          return;
+        } catch (error) {
+          state.error = error.message;
+          await loadLoginEvents();
+          renderLogin();
+          return;
+        }
+      }
       if (!state.token) {
         await loadLoginEvents();
         renderLogin();
@@ -3885,6 +4813,50 @@ const App = (() => {
       state.changePickerOpen = false;
       state.eventRoleModal = null;
       state.eventCreateModalOpen = false;
+      state.globalSearchOpen = false;
+      render();
+    },
+    openDashboardDrill(filter) {
+      state.exhibitorFilter = filter || "";
+      state.view = "exhibitor-list";
+      state.openMenuGroups.add("customer-data");
+      render();
+    },
+    clearExhibitorFilter() {
+      state.exhibitorFilter = "";
+      render();
+    },
+    setExhibitorFilter(value) {
+      state.exhibitorFilter = value || "";
+      render();
+    },
+    setCustomerFilter(key, value) {
+      if (key === "oldCustomerFilter") state.oldCustomerFilter = value || "";
+      else state.newCustomerFilter = value || "";
+      render();
+    },
+    openTodoTarget(key) {
+      const approvalTabs = {
+        approval: "payments",
+        "fascia-review": "fascia",
+        "rental-review": "rentals"
+      };
+      if (key === "enterprise-profile") {
+        state.view = "enterprise";
+      } else if (approvalTabs[key]) {
+        state.view = "approvals";
+        state.approvalTab = approvalTabs[key];
+      } else {
+        const filterMap = {
+          "pending-contract": "pending-contract",
+          "pending-voucher": "pending-voucher",
+          "soon-release": "soon-release",
+          "profile-missing": "profile-missing"
+        };
+        state.exhibitorFilter = filterMap[key] || "";
+        state.view = "exhibitor-list";
+        state.openMenuGroups.add("customer-data");
+      }
       render();
     },
     toggleMenuGroup(key) {
@@ -4037,12 +5009,142 @@ const App = (() => {
       state.customerModalOpen = false;
       render();
     },
+    refreshCompanySimilarity(context = "cust") {
+      const fieldPrefix = context === "order" ? "company" : "cust";
+      const target = byId(`${context}-similar-hints`);
+      if (!target) return;
+      const payload = {
+        name: byId(`${fieldPrefix}-name`)?.value || "",
+        shortName: byId(`${fieldPrefix}-short-name`)?.value || "",
+        contactName: byId(`${fieldPrefix}-contact`)?.value || "",
+        phone: byId(`${fieldPrefix}-phone`)?.value || "",
+        taxNo: byId(`${fieldPrefix}-tax`)?.value || ""
+      };
+      const excludeCompanyId = context === "order" ? state.orderDraft.companyId : null;
+      target.innerHTML = similarCompanyWarningHtml(payload, excludeCompanyId);
+    },
     openCompanyDetail(companyId) {
       state.companyDetailId = Number(companyId || 0);
       render();
     },
     closeCompanyDetail() {
       state.companyDetailId = null;
+      state.companyEditId = null;
+      render();
+    },
+    startCompanyEdit(companyId) {
+      state.companyEditId = Number(companyId || 0);
+      render();
+    },
+    cancelCompanyEdit() {
+      state.companyEditId = null;
+      render();
+    },
+    refreshCompanyEditLocation() {
+      const locationType = byId("edit-company-location-type")?.value || "domestic";
+      document.querySelectorAll("[data-edit-location='domestic']").forEach((item) => {
+        item.style.display = locationType === "overseas" ? "none" : "";
+      });
+      document.querySelectorAll("[data-edit-location='overseas']").forEach((item) => {
+        item.style.display = locationType === "overseas" ? "" : "none";
+      });
+    },
+    refreshCompanyEditCities() {
+      const province = byId("edit-company-province")?.value || "";
+      const city = byId("edit-company-city");
+      if (city) city.innerHTML = cityOptions(province, "");
+    },
+    async saveCompanyEdit(companyId) {
+      const locationType = byId("edit-company-location-type")?.value || "domestic";
+      const payload = {
+        name: byId("edit-company-name")?.value.trim() || "",
+        shortName: byId("edit-company-short-name")?.value.trim() || "",
+        contactName: byId("edit-company-contact")?.value.trim() || "",
+        phone: byId("edit-company-phone")?.value.trim() || "",
+        email: byId("edit-company-email")?.value.trim() || "",
+        taxNo: byId("edit-company-tax")?.value.trim() || "",
+        address: byId("edit-company-address")?.value.trim() || "",
+        locationType,
+        countryRegion: locationType === "overseas" ? byId("edit-company-country-region")?.value || "" : "",
+        province: locationType === "overseas" ? "" : byId("edit-company-province")?.value || "",
+        city: locationType === "overseas" ? "" : byId("edit-company-city")?.value || ""
+      };
+      if (!payload.name) {
+        state.error = "请填写企业名称";
+        render();
+        return;
+      }
+      const result = await run(() => api(`/api/companies/${companyId}`, { method: "PUT", body: payload }), "客户资料已保存");
+      if (result) {
+        state.companyEditId = null;
+        render();
+      }
+    },
+    openGlobalSearch() {
+      if (state.globalSearchOpen) return;
+      state.globalSearchOpen = true;
+      render();
+      setTimeout(() => {
+        const input = byId("global-search-input");
+        if (input) {
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
+      }, 0);
+    },
+    setGlobalSearch(value) {
+      state.globalSearchQuery = value || "";
+      state.globalSearchOpen = true;
+      render();
+      setTimeout(() => {
+        const input = byId("global-search-input");
+        if (input) {
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
+      }, 0);
+    },
+    clearGlobalSearch() {
+      state.globalSearchQuery = "";
+      state.globalSearchOpen = false;
+      render();
+    },
+    openGlobalSearchResult(type, id) {
+      state.globalSearchQuery = "";
+      state.globalSearchOpen = false;
+      state.error = "";
+      state.message = "";
+      if (type === "company") {
+        state.companyDetailId = Number(id);
+        render();
+        return;
+      }
+      if (type === "order") {
+        const order = (state.data.orders || []).find((item) => Number(item.id) === Number(id));
+        if (order) {
+          state.view = "exhibitor-list";
+          state.openMenuGroups.add("customer-data");
+          state.companyDetailId = Number(order.companyId);
+        }
+        render();
+        return;
+      }
+      if (type === "booth") {
+        const booth = (state.data.booths || []).find((item) => Number(item.id) === Number(id));
+        if (booth) {
+          state.view = "sales-map";
+          state.salesMapSearch = booth.boothNo || "";
+          state.salesMapZone = "";
+          state.salesMapAttr = "";
+          state.salesMapStatus = "";
+          state.salesMapOnlyAvailable = false;
+          state.salesMapFocusId = booth.id;
+          state.companyDetailId = null;
+          render();
+          setTimeout(() => scrollModalMapToBooth("sales-map-frame", booth), 0);
+          return;
+        }
+      }
       render();
     },
     updateCustomerDraft() {
@@ -4311,7 +5413,22 @@ const App = (() => {
     fitMapToViewport() {
       scheduleFitMapZoom();
     },
+    async undoMapEdit() {
+      const snapshot = state.mapUndoStack.pop();
+      if (!snapshot) return;
+      state.mapRedoStack.push(cloneMapSnapshot());
+      if (state.mapRedoStack.length > 30) state.mapRedoStack.shift();
+      await restoreMapSnapshot(snapshot, "展位图已撤销");
+    },
+    async redoMapEdit() {
+      const snapshot = state.mapRedoStack.pop();
+      if (!snapshot) return;
+      state.mapUndoStack.push(cloneMapSnapshot());
+      if (state.mapUndoStack.length > 30) state.mapUndoStack.shift();
+      await restoreMapSnapshot(snapshot, "展位图已重做");
+    },
     async saveMapScale() {
+      rememberMapState();
       await run(() => api("/api/map/settings", {
         method: "PUT",
         body: { scalePxPerMeter: Number(byId("map-scale").value || 16), resizeBoothsByScale: true }
@@ -4336,6 +5453,10 @@ const App = (() => {
     changeObstacleShape() {
       const obstacle = (state.data.obstacles || []).find((item) => item.id === state.selectedObstacleId);
       if (!obstacle) return;
+      if (state.obstacleSizePreviewHistoryId !== obstacle.id) {
+        rememberMapState();
+        state.obstacleSizePreviewHistoryId = obstacle.id;
+      }
       obstacle.shape = byId("obstacle-shape")?.value === "circle" ? "circle" : "rect";
       const widthM = obstacleWidthM(obstacle);
       const depthM = obstacleDepthM(obstacle);
@@ -4353,6 +5474,7 @@ const App = (() => {
       const widthM = pxToMeter(normalized.width, 3);
       const depthM = pxToMeter(normalized.height, 3);
       const scroll = captureMapScroll();
+      rememberMapState();
       const result = await run(() => api("/api/booths", {
         method: "POST",
         body: {
@@ -4399,6 +5521,7 @@ const App = (() => {
         event.preventDefault();
         state.selectedObstacleId = obstacleId;
         if (obstacle.boothId) state.selectedBoothId = Number(obstacle.boothId);
+        state.mapObstacleDragSnapshot = cloneMapSnapshot();
         state.obstacleDragging = {
           obstacleId,
           startX: start.x,
@@ -4412,9 +5535,10 @@ const App = (() => {
       if (group && !state.drawMode) {
         const boothId = Number(group.dataset.boothId);
         const booth = state.data.booths.find((item) => item.id === boothId);
-        if (!booth || booth.status === "sold") return;
+        if (!booth || booth.status === "sold" || booth.locked) return;
         const start = svgPoint(event);
         state.selectedBoothId = boothId;
+        state.mapDragSnapshot = cloneMapSnapshot();
         state.dragging = {
           boothId,
           startX: start.x,
@@ -4533,6 +5657,7 @@ const App = (() => {
           boothId = booth.id;
         }
         const scroll = captureMapScroll();
+        rememberMapState();
         await run(() => api("/api/obstacles", {
           method: "POST",
           body: {
@@ -4559,6 +5684,12 @@ const App = (() => {
           const obstacle = (state.data.obstacles || []).find((item) => item.id === drag.obstacleId);
           if (obstacle) {
             const scroll = captureMapScroll();
+            if (state.mapObstacleDragSnapshot) {
+              state.mapUndoStack.push(state.mapObstacleDragSnapshot);
+              if (state.mapUndoStack.length > 30) state.mapUndoStack.shift();
+              state.mapRedoStack = [];
+              state.mapObstacleDragSnapshot = null;
+            }
             const result = await run(() => api(`/api/obstacles/${obstacle.id}`, {
               method: "PUT",
               body: { x: Math.round(obstacle.x), y: Math.round(obstacle.y) }
@@ -4574,6 +5705,7 @@ const App = (() => {
             restoreMapScroll(scroll);
           }
         }
+        if (!drag.moved) state.mapObstacleDragSnapshot = null;
         return;
       }
       if (state.selecting) {
@@ -4584,7 +5716,7 @@ const App = (() => {
         const rect = rectFromPoints(selecting.start, svgPoint(event));
         if (rect.width < 8 || rect.height < 8) return;
         const hits = state.data.booths
-          .filter((booth) => booth.status === "available" && boothIntersectsRect(booth, rect))
+          .filter((booth) => booth.status === "available" && !booth.locked && boothIntersectsRect(booth, rect))
           .sort((a, b) => (Number(a.y || 0) - Number(b.y || 0)) || (Number(a.x || 0) - Number(b.x || 0)));
         const selected = selecting.additive ? new Set(state.selectedBoothIds) : new Set();
         hits.forEach((booth) => selected.add(booth.id));
@@ -4604,6 +5736,12 @@ const App = (() => {
           const booth = state.data.booths.find((item) => item.id === drag.boothId);
           if (booth) {
             const scroll = captureMapScroll();
+            if (state.mapDragSnapshot) {
+              state.mapUndoStack.push(state.mapDragSnapshot);
+              if (state.mapUndoStack.length > 30) state.mapUndoStack.shift();
+              state.mapRedoStack = [];
+              state.mapDragSnapshot = null;
+            }
             await run(() => api(`/api/booths/${booth.id}`, {
               method: "PUT",
               body: { x: booth.x, y: booth.y }
@@ -4611,6 +5749,7 @@ const App = (() => {
             restoreMapScroll(scroll);
           }
         }
+        if (!drag.moved) state.mapDragSnapshot = null;
         return;
       }
       if (!state.drawing || !isAdminLikeRole(state.data.me.role) || !state.drawMode) return;
@@ -4674,6 +5813,10 @@ const App = (() => {
     previewObstacleSize() {
       const obstacle = (state.data.obstacles || []).find((item) => item.id === state.selectedObstacleId);
       if (!obstacle) return;
+      if (state.obstacleSizePreviewHistoryId !== obstacle.id) {
+        rememberMapState();
+        state.obstacleSizePreviewHistoryId = obstacle.id;
+      }
       const widthM = Number(byId("obstacle-width-m")?.value || 0);
       const depthM = Number(byId("obstacle-depth-m")?.value || 0);
       if (!Number.isFinite(widthM) || !Number.isFinite(depthM)) return;
@@ -4723,6 +5866,7 @@ const App = (() => {
         return;
       }
       const scroll = captureMapScroll();
+      if (state.obstacleSizePreviewHistoryId !== obstacle.id) rememberMapState();
       const result = await run(() => api(`/api/obstacles/${obstacle.id}`, {
         method: "PUT",
         body: {
@@ -4735,13 +5879,17 @@ const App = (() => {
           height: Math.round(next.rect.height)
         }
       }), "障碍物尺寸已保存，相关展位价格已重新计算");
-      if (result) restoreMapScroll(scroll);
+      if (result) {
+        state.obstacleSizePreviewHistoryId = null;
+        restoreMapScroll(scroll);
+      }
     },
     async deleteObstacle(obstacleId) {
       const obstacle = (state.data.obstacles || []).find((item) => item.id === obstacleId);
       if (!obstacle) return;
       if (!window.confirm("确认删除这个障碍物？")) return;
       const scroll = captureMapScroll();
+      rememberMapState();
       const result = await run(() => api(`/api/obstacles/${obstacleId}`, { method: "DELETE" }), "障碍物已删除，相关展位价格已重新计算");
       if (result) {
         state.selectedObstacleId = null;
@@ -4944,6 +6092,27 @@ const App = (() => {
         }
       }), "退订申请已提交，等待管理员审核");
     },
+    async requestSpecialOrder(orderId) {
+      const order = state.data.orders.find((item) => item.id === orderId);
+      if (!order) return;
+      const reason = window.prompt(
+        `请输入特殊订单申请原因\n订单：${order.orderNo}\n企业：${getCompany(order.companyId).name || "-"}`,
+        "客户付款进度较慢，申请特殊成交"
+      );
+      if (reason === null) return;
+      const result = await run(() => api(`/api/orders/${orderId}/change-requests`, {
+        method: "POST",
+        body: {
+          type: "特殊订单申请",
+          action: "special_order",
+          detail: String(reason || "").trim() || "客户付款进度较慢，申请特殊成交"
+        }
+      }), "特殊订单申请已提交，等待管理员审核");
+      if (result) {
+        state.paymentModalOrderId = null;
+        render();
+      }
+    },
     async uploadBackground() {
       await run(async () => {
         const input = byId("bg-file");
@@ -4977,9 +6146,15 @@ const App = (() => {
     async saveBooth() {
       const booth = state.data.booths.find((item) => item.id === state.selectedBoothId);
       if (!booth) return;
+      if (booth.locked) {
+        state.error = "展位已锁定，请先解锁再编辑";
+        render();
+        return;
+      }
       const widthM = Number(byId("booth-width-m").value || booth.widthM || 0);
       const depthM = Number(byId("booth-depth-m").value || booth.depthM || 0);
-      await run(() => api(`/api/booths/${booth.id}`, {
+      if (state.boothSizePreviewHistoryId !== booth.id) rememberMapState();
+      const result = await run(() => api(`/api/booths/${booth.id}`, {
         method: "PUT",
         body: {
           boothNo: byId("booth-no").value.trim(),
@@ -4994,10 +6169,16 @@ const App = (() => {
           height: meterToPx(depthM || booth.depthM)
         }
       }), "展位已保存");
+      if (result) state.boothSizePreviewHistoryId = null;
     },
     previewBoothSize() {
       const booth = state.data.booths.find((item) => item.id === state.selectedBoothId);
       if (!booth) return;
+      if (booth.locked) return;
+      if (state.boothSizePreviewHistoryId !== booth.id) {
+        rememberMapState();
+        state.boothSizePreviewHistoryId = booth.id;
+      }
       const widthM = Number(byId("booth-width-m")?.value || booth.widthM || 0);
       const depthM = Number(byId("booth-depth-m")?.value || booth.depthM || 0);
       const width = meterToPx(widthM);
@@ -5023,7 +6204,8 @@ const App = (() => {
       booth.area = Number((widthM * depthM).toFixed(2));
     },
     async batchUpdateBooths() {
-      const ids = [...state.selectedBoothIds];
+      const selected = selectedAvailableBooths();
+      const ids = selected.map((booth) => booth.id);
       if (!ids.length) {
         state.error = "请先选择要批量更新的展位";
         render();
@@ -5032,16 +6214,29 @@ const App = (() => {
       const patch = { hall: byId("batch-hall").value, zone: byId("batch-zone").value, attr: byId("batch-attr").value };
       const status = byId("batch-status").value;
       if (status) patch.status = status;
+      rememberMapState();
       await run(() => api("/api/booths/batch", {
         method: "POST",
         body: { ids, patch }
       }), "批量更新完成");
+    },
+    async toggleBoothLock(boothId) {
+      const booth = state.data.booths.find((item) => item.id === boothId);
+      if (!booth) return;
+      const scroll = captureMapScroll();
+      rememberMapState();
+      const result = await run(() => api(`/api/booths/${boothId}`, {
+        method: "PUT",
+        body: { locked: !booth.locked }
+      }), booth.locked ? "展位已解锁" : "展位已锁定");
+      if (result) restoreMapScroll(scroll);
     },
     async deleteBooth(boothId) {
       const booth = state.data.booths.find((item) => item.id === boothId);
       if (!booth) return;
       if (!window.confirm(`确认删除展位 ${booth.boothNo}？`)) return;
       const scroll = captureMapScroll();
+      rememberMapState();
       const result = await run(() => api(`/api/booths/${boothId}`, { method: "DELETE" }), "展位已删除");
       if (result) {
         state.selectedBoothIds.delete(boothId);
@@ -5051,16 +6246,17 @@ const App = (() => {
       }
     },
     async deleteSelectedBooths() {
-      const ids = [...state.selectedBoothIds];
+      const booths = selectedAvailableBooths();
+      const ids = booths.map((booth) => booth.id);
       if (!ids.length) {
         state.error = "请先框选要删除的空闲展位";
         render();
         return;
       }
-      const booths = ids.map((id) => state.data.booths.find((booth) => booth.id === id)).filter(Boolean);
       if (!window.confirm(`确认删除选中的 ${booths.length} 个展位？`)) return;
-      if (booths.length >= 5 && window.prompt("批量删除不可撤销，请输入“删除”确认") !== "删除") return;
+      if (booths.length >= 5 && window.prompt("批量删除后可用“误删恢复”恢复，请输入“删除”确认") !== "删除") return;
       const scroll = captureMapScroll();
+      rememberMapState();
       const result = await run(() => api("/api/booths/delete", {
         method: "POST",
         body: { ids }
@@ -5069,6 +6265,81 @@ const App = (() => {
         state.selectedBoothIds.clear();
         state.selectedBoothId = null;
         render();
+        restoreMapScroll(scroll);
+      }
+    },
+    async copySelectedBooths() {
+      const selected = selectedAvailableBooths();
+      if (!selected.length) {
+        state.error = "请先框选要复制的空闲展位";
+        render();
+        return;
+      }
+      const offsetInput = window.prompt("复制后的偏移像素", "12");
+      if (offsetInput === null) return;
+      const offset = Math.max(1, Number(offsetInput || 12) || 12);
+      const map = state.data.map || {};
+      const existingNos = new Set((state.data.booths || []).map((booth) => String(booth.boothNo || "").trim()).filter(Boolean));
+      const prefix = String(state.drawBoothNoPrefix || "").trim();
+      const totalChars = Math.max(prefix.length + 1, Number(state.drawBoothNoChars || 0) || 4);
+      const numericWidth = Math.max(1, totalChars - prefix.length);
+      const startNo = Math.max(0, Number(state.drawBoothNoStart || 0) || 1);
+      const step = state.drawBoothNoSkipEnabled === "yes" ? Math.max(1, Number(state.drawBoothNoStep || 0) || 1) : 1;
+      const pattern = new RegExp(`^${escapeRegExp(prefix)}(\\d+)$`);
+      const formatNo = (number) => `${prefix}${String(number).padStart(numericWidth, "0")}`;
+      const numbers = [...existingNos]
+        .map((value) => value.match(pattern))
+        .filter(Boolean)
+        .map((match) => Number(match[1]))
+        .filter((number) => Number.isFinite(number));
+      let candidate = state.drawBoothNoResetActive || !numbers.length ? startNo : Math.max(startNo - step, ...numbers) + step;
+      const nextCopyNo = () => {
+        for (let index = 0; index < 10000; index += 1) {
+          const boothNo = formatNo(candidate);
+          candidate += step;
+          if (!existingNos.has(boothNo)) {
+            existingNos.add(boothNo);
+            return boothNo;
+          }
+        }
+        const fallback = `复制${Date.now()}`;
+        existingNos.add(fallback);
+        return fallback;
+      };
+      const clones = selected.map((booth) => {
+        const rect = clampRectToMap({
+          x: Number(booth.x || 0) + offset,
+          y: Number(booth.y || 0) + offset,
+          width: Number(booth.width || 0),
+          height: Number(booth.height || 0)
+        });
+        return {
+          ...booth,
+          id: 0,
+          boothNo: nextCopyNo(),
+          x: rect.x,
+          y: rect.y,
+          status: "available",
+          orderId: null,
+          reservedAt: null,
+          reservedBy: null,
+          locked: false,
+          updatedAt: new Date().toISOString()
+        };
+      });
+      const snapshot = cloneMapSnapshot();
+      const scroll = captureMapScroll();
+      rememberMapState();
+      const result = await run(() => api("/api/map/snapshot", {
+        method: "POST",
+        body: {
+          booths: snapshot.booths.concat(clones),
+          obstacles: snapshot.obstacles
+        }
+      }), `已复制 ${clones.length} 个展位`);
+      if (result) {
+        state.selectedBoothIds.clear();
+        state.selectedBoothId = null;
         restoreMapScroll(scroll);
       }
     },
@@ -5086,6 +6357,7 @@ const App = (() => {
           ? { id: booth.id, y: preciseCoord(boothCenterY(base) - Number(booth.height || 0) / 2) }
           : { id: booth.id, x: preciseCoord(boothCenterX(base) - Number(booth.width || 0) / 2) }
       ));
+      rememberMapState();
       await run(() => api("/api/booths/batch", {
         method: "POST",
         body: { ids: selected.map((booth) => booth.id), positions }
@@ -5165,6 +6437,7 @@ const App = (() => {
         x: preciseCoord(item.x),
         y: preciseCoord(item.y)
       }));
+      rememberMapState();
       await run(() => api("/api/booths/batch", {
         method: "POST",
         body: { ids: selected.map((booth) => booth.id), positions: finalPositions }
@@ -5172,7 +6445,8 @@ const App = (() => {
     },
     async clearAllBooths() {
       if (!window.confirm("确认清空全部展位？该操作只允许在没有未结束订单时执行。")) return;
-      if (window.prompt("清空展位图不可撤销，请输入“清空展位图”确认") !== "清空展位图") return;
+      if (window.prompt("清空后可用“误删恢复”恢复，请输入“清空展位图”确认") !== "清空展位图") return;
+      rememberMapState();
       await run(() => api("/api/booths/clear", { method: "POST" }), "展位图已清空，可以重新绘制");
       state.selectedBoothId = null;
       state.selectedBoothIds.clear();
@@ -5181,6 +6455,7 @@ const App = (() => {
     async generateGrid(replace) {
       const confirmText = replace ? "确认重置现有展位为 520 个样例展位？" : "确认追加 520 个样例展位？";
       if (!window.confirm(confirmText)) return;
+      rememberMapState();
       await run(() => api("/api/booths/generate-grid", {
         method: "POST",
         body: { rows: 20, cols: 26, startNo: replace ? 1001 : state.data.booths.length + 1001, replace }
@@ -5285,10 +6560,33 @@ const App = (() => {
         render();
       }
     },
+    openAttachmentPreview(id) {
+      state.attachmentPreviewId = Number(id);
+      render();
+    },
+    closeAttachmentPreview() {
+      state.attachmentPreviewId = null;
+      render();
+    },
     async issueEnterpriseAccount(orderId) {
       const result = await run(() => api(`/api/orders/${orderId}/enterprise-account`, { method: "POST" }), "企业账号已生成");
       if (result) {
         window.alert(`企业账号：${result.username}\n临时密码：${result.password}`);
+      }
+    },
+    async issueEnterpriseLink(orderId) {
+      const days = enterpriseLinkDaysValue();
+      const result = await run(() => api(`/api/orders/${orderId}/enterprise-link`, {
+        method: "POST",
+        body: { days }
+      }), "企业免登录链接已生成");
+      if (result) {
+        try {
+          await navigator.clipboard.writeText(result.link);
+          window.prompt(`企业免登录链接已生成并复制，有效期至：${date(result.expiresAt)}`, result.link);
+        } catch (_) {
+          window.prompt(`企业免登录链接已生成，有效期至：${date(result.expiresAt)}`, result.link);
+        }
       }
     },
     async submitChangeRequest(orderId) {
@@ -5358,11 +6656,14 @@ const App = (() => {
             oldCustomerProtectDays: Number(byId("rule-old-customer-days").value || 0),
             contractApprovedVoucherWorkdays: Number(byId("rule-contract-voucher-workdays")?.value ?? state.data.settings.rules.contractApprovedVoucherWorkdays ?? state.data.settings.rules.reserveWorkdays ?? 7),
             salesFlowMode: byId("rule-sales-flow")?.value || "voucher_direct",
-            customerTargetMode: byId("rule-customer-target-mode")?.value || "sales"
+            customerTargetMode: byId("rule-customer-target-mode")?.value || "sales",
+            enterpriseLinkDays: clampEnterpriseLinkDaysValue(byId("rule-enterprise-link-days")?.value),
+            enterpriseLinkDaysCustomized: clampEnterpriseLinkDaysValue(byId("rule-enterprise-link-days")?.value) < eventCountdownDaysValue()
           },
           salesTargets: this.collectSalesTargets(),
           departmentTargets: this.collectDepartmentTargets(),
-          discountRules: this.collectDiscountRules()
+          discountRules: this.collectDiscountRules(),
+          reviewRejectTemplates: (byId("review-reject-templates")?.value || "").split(/\n+/).map((item) => item.trim()).filter(Boolean)
         }
       }), "销售规则已保存");
     },
@@ -5379,6 +6680,10 @@ const App = (() => {
       rules.contractApprovedVoucherWorkdays = Number(byId("rule-contract-voucher-workdays")?.value ?? rules.contractApprovedVoucherWorkdays ?? rules.reserveWorkdays ?? 7);
       rules.salesFlowMode = byId("rule-sales-flow")?.value || "voucher_direct";
       rules.customerTargetMode = byId("rule-customer-target-mode")?.value || rules.customerTargetMode || "sales";
+      rules.enterpriseLinkDays = clampEnterpriseLinkDaysValue(byId("rule-enterprise-link-days")?.value ?? rules.enterpriseLinkDays);
+      if (byId("review-reject-templates")) {
+        state.data.settings.reviewRejectTemplates = byId("review-reject-templates").value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+      }
       render();
     },
     collectSalesTargets() {
@@ -5673,6 +6978,10 @@ const App = (() => {
         }
       }), "参展证已添加");
     },
+    async deleteBadge(badgeId) {
+      if (!window.confirm("确认删除这条参展证信息？")) return;
+      await run(() => api(`/api/exhibitor/badges/${encodeURIComponent(badgeId)}`, { method: "DELETE" }), "参展证已删除");
+    },
     async submitFascia() {
       await run(() => api("/api/exhibitor/fascia", {
         method: "POST",
@@ -5688,6 +6997,10 @@ const App = (() => {
         method: "POST",
         body: { furnitureId: byId("rental-furniture").value, qty: Number(byId("rental-qty").value || 1) }
       }), "展具申请已提交");
+    },
+    async deleteRental(rentalId) {
+      if (!window.confirm("确认删除这条展具增租申请？")) return;
+      await run(() => api(`/api/exhibitor/rentals/${encodeURIComponent(rentalId)}`, { method: "DELETE" }), "展具增租申请已删除");
     },
     async downloadExport(path, filename) {
       try {
