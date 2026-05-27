@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "migrate:mysql": "node migrate_sqlite_to_mysql.js",
-    "mysql:init": "node run_mysql_store.js init"
+    "mysql:init": "python mysql_store.py init"
   },
   "engines": {
     "node": ">=18"

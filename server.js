@@ -5,37 +5,46 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const { URL } = require("url");
+const eventRules = require("./lib/domain/eventRules");
+const boothMath = require("./lib/domain/boothMath");
+const orderWorkflow = require("./lib/domain/orderWorkflow");
 
+const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
+const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
+const UPLOAD_DIR = path.join(ROOT, "storage", "uploads");
+const SQLITE_FILE = process.env.SQLITE_FILE
+  ? path.resolve(process.env.SQLITE_FILE)
+  : path.join(DATA_DIR, "expo_sales.db");
+const SQLITE_HELPER = path.join(ROOT, "sqlite_store.py");
+const MYSQL_HELPER = path.join(ROOT, "mysql_store.py");
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-  for (const line of lines) {
+  lines.forEach((line) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const equalsIndex = trimmed.indexOf("=");
-    if (equalsIndex <= 0) continue;
-    const key = trimmed.slice(0, equalsIndex).trim();
-    let value = trimmed.slice(equalsIndex + 1).trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+    const index = trimmed.indexOf("=");
+    if (index <= 0) return;
+    const key = trimmed.slice(0, index).trim();
+    let value = trimmed.slice(index + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
-      process.env[key] = value;
+    if (key === "PYTHONPATH") {
+      value = value
+        .split(path.delimiter)
+        .map((entry) => entry && !path.isAbsolute(entry) ? path.join(ROOT, entry) : entry)
+        .join(path.delimiter);
     }
-  }
+    if (process.env[key] === undefined) process.env[key] = value;
+  });
 }
 
 loadEnvFile(path.join(DATA_DIR, "mysql-app.env"));
 
-const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_DIR = path.join(ROOT, "public");
-const UPLOAD_DIR = path.join(ROOT, "storage", "uploads");
-const SQLITE_FILE = path.join(DATA_DIR, "expo_sales.db");
-const SQLITE_HELPER = path.join(ROOT, "sqlite_store.py");
-const MYSQL_HELPER = path.join(ROOT, "mysql_store.py");
 const DB_DRIVER = String(process.env.DB_DRIVER || (process.env.MYSQL_HOST || process.env.DATABASE_URL ? "mysql" : "sqlite")).toLowerCase();
 const BUNDLED_PYTHON_BIN = path.join(
   process.env.USERPROFILE || "",
@@ -173,6 +182,22 @@ function normalizeEvents(events, currentEvent) {
 
 function eventCategory(event) {
   return String(event?.category || "默认类别").trim() || "默认类别";
+}
+
+function localDateStart(value) {
+  return eventRules.localDateStart(value);
+}
+
+function eventCountdownDays(event) {
+  return eventRules.eventCountdownDays(event);
+}
+
+function enterpriseLinkMaxDays(db) {
+  return eventRules.enterpriseLinkMaxDays(db);
+}
+
+function clampEnterpriseLinkDays(db, value) {
+  return eventRules.clampEnterpriseLinkDays(db, value);
 }
 
 function normalizeEventCategories(categories, events = []) {
@@ -321,6 +346,119 @@ function customerTargetMode(db) {
   return db.settings?.rules?.customerTargetMode === "department" ? "department" : "sales";
 }
 
+function sameDepartment(db, userId, otherUserId) {
+  const userDepartment = Number(db.users.find((item) => Number(item.id) === Number(userId))?.departmentId || 0);
+  const otherDepartment = Number(db.users.find((item) => Number(item.id) === Number(otherUserId))?.departmentId || 0);
+  return Boolean(userDepartment && otherDepartment && userDepartment === otherDepartment);
+}
+
+function canAccessSalesOwner(db, user, ownerSalesId) {
+  if (!user) return false;
+  if (isAdminLike(user)) return true;
+  if (user.role !== "sales") return false;
+  if (Number(ownerSalesId) === Number(user.id)) return true;
+  return customerTargetMode(db) === "department" && sameDepartment(db, user.id, ownerSalesId);
+}
+
+function userDepartmentId(db, userId) {
+  return Number(db.users.find((item) => Number(item.id) === Number(userId))?.departmentId || 0) || null;
+}
+
+function contactScopeForOwner(db, ownerSalesId) {
+  const salesId = Number(ownerSalesId || 0);
+  if (!salesId) return "";
+  if (customerTargetMode(db) === "department") {
+    const departmentId = userDepartmentId(db, salesId);
+    if (departmentId) return `department:${departmentId}`;
+  }
+  return `sales:${salesId}`;
+}
+
+function normalizeLeadContactVersions(versions) {
+  const seen = new Set();
+  return (Array.isArray(versions) ? versions : []).map((row) => {
+    const scopeKey = String(row?.scopeKey || "").trim();
+    if (!scopeKey || seen.has(scopeKey)) return null;
+    seen.add(scopeKey);
+    return {
+      scopeKey,
+      ownerSalesId: Number(row?.ownerSalesId || 0) || null,
+      departmentId: Number(row?.departmentId || 0) || null,
+      contactName: String(row?.contactName || "").trim(),
+      phone: String(row?.phone || "").trim(),
+      savedAt: String(row?.savedAt || "").trim()
+    };
+  }).filter(Boolean);
+}
+
+function leadContactVersionForOwner(db, lead, ownerSalesId) {
+  const scopeKey = contactScopeForOwner(db, ownerSalesId);
+  if (!scopeKey) return null;
+  const versions = normalizeLeadContactVersions(lead?.contactVersions);
+  return versions.find((item) => item.scopeKey === scopeKey) || null;
+}
+
+function saveLeadContactVersion(db, lead, ownerSalesId, company) {
+  const scopeKey = contactScopeForOwner(db, ownerSalesId);
+  if (!lead || !company || !scopeKey) return;
+  const versions = normalizeLeadContactVersions(lead.contactVersions);
+  const existing = versions.find((item) => item.scopeKey === scopeKey);
+  const payload = {
+    scopeKey,
+    ownerSalesId: Number(ownerSalesId || 0) || null,
+    departmentId: userDepartmentId(db, ownerSalesId),
+    contactName: String(company.contactName || "").trim(),
+    phone: String(company.phone || "").trim(),
+    savedAt: nowIso()
+  };
+  if (existing) Object.assign(existing, payload);
+  else versions.push(payload);
+  lead.contactVersions = versions;
+}
+
+function rememberLeadContactOwner(db, lead, ownerSalesId) {
+  const salesId = Number(ownerSalesId || 0);
+  if (!lead || !salesId) return;
+  const versions = normalizeLeadContactVersions(lead.contactVersions);
+  if (versions.some((item) => item.scopeKey === contactScopeForOwner(db, salesId))) {
+    lead.contactVersions = versions;
+    lead.previousOwnerSalesId = salesId;
+    return;
+  }
+  const company = db.companies.find((item) => Number(item.id) === Number(lead.companyId));
+  if (company && !versions.length && !lead.previousOwnerSalesId) saveLeadContactVersion(db, lead, salesId, company);
+  lead.previousOwnerSalesId = salesId;
+}
+
+function companyForUser(db, user, company, lead) {
+  const row = { ...company };
+  if (!user || user.role !== "sales" || !lead) return row;
+  const versions = normalizeLeadContactVersions(lead.contactVersions);
+  const version = leadContactVersionForOwner(db, lead, user.id);
+  if (version) {
+    row.contactName = version.contactName;
+    row.phone = version.phone;
+    row.contactMasked = false;
+    return row;
+  }
+  const hasPrivacyHistory = versions.length > 0 || Boolean(lead.previousOwnerSalesId);
+  const protectedOwnerVisible = lead.status === "protected" && canAccessSalesOwner(db, user, lead.ownerSalesId);
+  const publicOwnerVisible = lead.status === "public"
+    && (lead.previousOwnerSalesId || lead.ownerSalesId)
+    && canAccessSalesOwner(db, user, lead.previousOwnerSalesId || lead.ownerSalesId);
+  if ((protectedOwnerVisible || publicOwnerVisible) && !hasPrivacyHistory) return row;
+  row.contactName = "";
+  row.phone = "";
+  row.contactMasked = true;
+  return row;
+}
+
+function leadForUser(user, lead) {
+  if (isAdminLike(user)) return lead;
+  const { contactVersions, ...safeLead } = lead;
+  return safeLead;
+}
+
 function salesFlowMode(db) {
   return db.settings?.rules?.salesFlowMode === "contract_first" ? "contract_first" : "voucher_direct";
 }
@@ -361,6 +499,8 @@ function normalizeCustomerLeads(leads) {
     voucherReviewRemark: String(lead?.voucherReviewRemark || "").trim(),
     voucherDueAt: String(lead?.voucherDueAt || "").trim(),
     publicReason: String(lead?.publicReason || "").trim(),
+    previousOwnerSalesId: Number(lead?.previousOwnerSalesId || 0) || null,
+    contactVersions: normalizeLeadContactVersions(lead?.contactVersions),
     createdAt: String(lead?.createdAt || nowIso()).trim(),
     claimedAt: String(lead?.claimedAt || "").trim(),
     releasedAt: String(lead?.releasedAt || "").trim(),
@@ -474,6 +614,7 @@ function releaseOrderBooths(db, order, reason, actor) {
 
 function releaseLeadToPublic(db, lead, reason, actor) {
   if (!lead || lead.status === "public" || lead.status === "converted") return false;
+  rememberLeadContactOwner(db, lead, lead.ownerSalesId);
   lead.status = "public";
   lead.releasedAt = nowIso();
   lead.protectedUntil = "";
@@ -546,6 +687,7 @@ function releaseExpiredCustomerLeads(db) {
     if (workflowHoldLead(db, lead)) return;
     const end = new Date(lead.protectedUntil).getTime();
     if (Number.isFinite(end) && end <= now) {
+      rememberLeadContactOwner(db, lead, lead.ownerSalesId);
       lead.status = "public";
       lead.ownerSalesId = null;
       lead.releasedAt = nowIso();
@@ -585,7 +727,7 @@ function materializeOldCustomerLeads(db) {
         customerType: "old",
         status: "protected",
         ownerSalesId: order.salespersonId,
-        protectedUntil: addDays(nowIso(), Number(db.settings.rules.oldCustomerProtectDays || 30)),
+        protectedUntil: addDays(nowIso(), Number(db.settings.rules.oldCustomerProtectDays ?? 30)),
         sourceOrderId: order.id,
         sourceEventName: order.eventName || eventById(db, order.eventId)?.name || "",
         sourceAmount: Number(order.totalAmount || 0),
@@ -627,6 +769,84 @@ function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
       lead.publicReason = "";
     }
   });
+}
+
+function reminderDueSoon(value, hours = 48) {
+  const due = new Date(value || 0).getTime();
+  if (!Number.isFinite(due)) return false;
+  const left = due - Date.now();
+  return left > 0 && left <= hours * 3600 * 1000;
+}
+
+function profileCompleteForReminder(profile) {
+  if (!profile) return false;
+  const catalog = profile.catalog || {};
+  return Boolean(
+    catalog.companyIntro
+    || catalog.productIntro
+    || Number(catalog.videoAttachmentId || 0)
+    || (catalog.productImageIds || []).length
+    || (profile.badges || []).length
+    || profile.fascia?.requestedName
+    || (profile.rentals || []).length
+  );
+}
+
+function syncWorkflowReminders(db) {
+  const eventId = currentEventId(db);
+  let changed = false;
+  const eventOrders = db.orders.filter((order) => String(order.eventId || eventId) === String(eventId) && isActiveOrder(order));
+  const admins = eventAdminUsers(db, eventId);
+  const adminReminder = (title, count) => {
+    if (!count) return;
+    admins.forEach((admin) => {
+      changed = notifyOnce(db, admin.id, title, `${count} 项待处理，请到审核模块查看`, eventId) || changed;
+    });
+  };
+
+  adminReminder("待审核客户合同", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.contractReviewStatus === "pending").length);
+  adminReminder("待审核客户水单", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.voucherReviewStatus === "pending").length);
+  adminReminder("待审核销售水单", db.payments.filter((payment) => {
+    const order = db.orders.find((item) => item.id === payment.orderId);
+    return payment.status === "pending" && order && String(order.eventId || eventId) === String(eventId);
+  }).length);
+  adminReminder("待审核订单变更", db.changeRequests.filter((request) => {
+    const order = db.orders.find((item) => item.id === request.orderId);
+    return request.status === "pending" && order && String(order.eventId || eventId) === String(eventId);
+  }).length);
+  adminReminder("待审核楣板/展具", db.profiles.filter((profile) => {
+    const order = db.orders.find((item) => item.id === profile.orderId);
+    if (!order || String(order.eventId || eventId) !== String(eventId)) return false;
+    return profile.fascia?.status === "pending" || (profile.rentals || []).some((rental) => rental.status === "pending");
+  }).length);
+
+  eventOrders.filter((order) => order.type === "booth").forEach((order) => {
+    const company = db.companies.find((item) => item.id === order.companyId);
+    const companyName = company?.name || order.orderNo;
+    const lead = activeLeadForOrder(db, order);
+    if (order.status !== "sold") {
+      if (salesFlowMode(db) === "contract_first") {
+        if (!lead || !["pending", "approved"].includes(lead.contractReviewStatus)) {
+          changed = notifyOnce(db, order.salespersonId, "待上传合同", `${companyName} ${order.orderNo} 尚未上传合同`, eventId) || changed;
+        } else if (lead.contractReviewStatus === "approved" && !["pending", "approved"].includes(lead.voucherReviewStatus)) {
+          changed = notifyOnce(db, order.salespersonId, "待上传水单", `${companyName} ${order.orderNo} 合同已通过，尚未上传水单`, eventId) || changed;
+        }
+      } else if (!lead || !["pending", "approved"].includes(lead.voucherReviewStatus)) {
+        changed = notifyOnce(db, order.salespersonId, "待上传水单", `${companyName} ${order.orderNo} 尚未上传水单`, eventId) || changed;
+      }
+      if (reminderDueSoon(order.reserveExpiresAt, 48) && !leadHasPendingReview(lead)) {
+        changed = notifyOnce(db, order.salespersonId, "展位即将释放", `${companyName} ${order.orderNo} 预留即将到期`, eventId) || changed;
+      }
+    } else if (order.enterpriseUserId) {
+      const profile = db.profiles.find((item) => item.orderId === order.id);
+      if (!profileCompleteForReminder(profile)) {
+        changed = notifyOnce(db, order.enterpriseUserId, "展务资料待填写", `${companyName} 请补充会刊、证件、楣板或展具信息`, eventId) || changed;
+        changed = notifyOnce(db, order.salespersonId, "企业资料未提交", `${companyName} 尚未提交完整展务资料`, eventId) || changed;
+      }
+    }
+  });
+
+  return changed;
 }
 
 function applySessionEvent(db, session) {
@@ -846,6 +1066,36 @@ function simpleEnterprisePassword() {
   return String(crypto.randomInt(100000, 1000000));
 }
 
+function ensureEnterpriseUserForOrder(db, order, password = "") {
+  const company = db.companies.find((item) => item.id === order.companyId);
+  let enterpriseUser = db.users.find((item) => item.id === order.enterpriseUserId);
+  const initialPassword = password || simpleEnterprisePassword();
+  if (!enterpriseUser) {
+    enterpriseUser = {
+      id: id(db, "user"),
+      username: `ent${order.orderNo.toLowerCase()}`,
+      passwordHash: hashPassword(initialPassword),
+      displayName: company ? company.name : `企业${order.id}`,
+      role: "enterprise",
+      active: true,
+      companyId: order.companyId,
+      orderId: order.id,
+      createdAt: nowIso(),
+      lastLoginAt: null
+    };
+    db.users.push(enterpriseUser);
+    order.enterpriseUserId = enterpriseUser.id;
+    order.enterpriseAccountIssuedAt = nowIso();
+  } else {
+    enterpriseUser.active = true;
+    enterpriseUser.companyId = order.companyId;
+    enterpriseUser.orderId = order.id;
+    if (password) enterpriseUser.passwordHash = hashPassword(password);
+  }
+  ensureProfile(db, order);
+  return enterpriseUser;
+}
+
 function id(db, key) {
   db.nextIds[key] = (db.nextIds[key] || 1) + 1;
   return db.nextIds[key] - 1;
@@ -880,8 +1130,11 @@ function defaultDb() {
         oldCustomerProtectDays: 30,
         deadlineDayMode: "workday",
         salesFlowMode: "voucher_direct",
-        contractApprovedVoucherWorkdays: 7
+        contractApprovedVoucherWorkdays: 7,
+        enterpriseLinkDays: 1,
+        enterpriseLinkDaysCustomized: false
       },
+      reviewRejectTemplates: ["合同未盖章", "金额不一致", "水单不清晰", "企业名称不一致"],
       salesTargets: [],
       departmentTargets: [],
       departments: [],
@@ -1019,7 +1272,16 @@ function normalizeDb(db) {
   db.settings.rules.salesFlowMode = salesFlowMode(db);
   db.settings.rules.customerTargetMode = customerTargetMode(db);
   db.settings.rules.contractApprovedVoucherWorkdays = contractApprovedVoucherWorkdays(db);
+  const eventLinkDefaultDays = enterpriseLinkMaxDays(db);
+  if (!db.settings.rules.enterpriseLinkDaysCustomized || db.settings.rules.enterpriseLinkDays === undefined || Number(db.settings.rules.enterpriseLinkDays) === 30) {
+    db.settings.rules.enterpriseLinkDays = eventLinkDefaultDays;
+  }
+  db.settings.rules.enterpriseLinkDays = clampEnterpriseLinkDays(db, db.settings.rules.enterpriseLinkDays);
+  db.settings.rules.enterpriseLinkDaysCustomized = Boolean(db.settings.rules.enterpriseLinkDaysCustomized);
   delete db.settings.rules.reserveDays;
+  db.settings.reviewRejectTemplates = Array.isArray(db.settings.reviewRejectTemplates) && db.settings.reviewRejectTemplates.length
+    ? db.settings.reviewRejectTemplates.map((item) => String(item || "").trim()).filter(Boolean)
+    : ["合同未盖章", "金额不一致", "水单不清晰", "企业名称不一致"];
   db.settings.workdaySync = db.settings.workdaySync || {
     sourceUrl: "https://timor.tech/api/holiday/year/{year}/",
     lastSyncedAt: "",
@@ -1071,6 +1333,7 @@ function normalizeDb(db) {
   ensureDefaultEventRoles(db);
   db.booths.forEach((booth) => {
     booth.hall = String(booth.hall || db.settings.halls[0] || "1号馆").trim();
+    booth.locked = Boolean(booth.locked);
   });
   db.companies.forEach((company) => {
     company.shortName = String(company.shortName || "").trim();
@@ -1169,43 +1432,51 @@ function notify(db, userId, title, content) {
   });
 }
 
+function notifyOnce(db, userId, title, content, eventId = currentEventId(db)) {
+  if (!userId) return false;
+  const since = Date.now() - 24 * 3600 * 1000;
+  const exists = db.notifications.some((item) => (
+    Number(item.userId) === Number(userId)
+    && String(item.eventId || eventId) === String(eventId)
+    && item.title === title
+    && item.content === content
+    && new Date(item.createdAt || 0).getTime() >= since
+  ));
+  if (exists) return false;
+  db.notifications.push({
+    id: id(db, "notification"),
+    eventId,
+    userId,
+    title,
+    content,
+    read: false,
+    createdAt: nowIso()
+  });
+  return true;
+}
+
 function obstacleShape(obstacle) {
-  return obstacle?.shape === "circle" ? "circle" : "rect";
+  return boothMath.obstacleShape(obstacle);
 }
 
 function obstacleAreaFromSize(widthM, depthM, shape = "rect") {
-  const width = Math.max(0, Number(widthM || 0));
-  const depth = Math.max(0, Number(depthM || 0));
-  const area = shape === "circle" ? Math.PI * (width / 2) * (depth / 2) : width * depth;
-  return Number(area.toFixed(3));
+  return boothMath.obstacleAreaFromSize(widthM, depthM, shape);
 }
 
 function obstacleAreaSqm(db, obstacle) {
-  const scale = Math.max(1, Number(db.map?.scalePxPerMeter || 16));
-  const area = Number(obstacle.area || 0);
-  if (area > 0) return area;
-  const widthM = obstacle.widthM !== undefined ? Number(obstacle.widthM || 0) : Number(obstacle.width || 0) / scale;
-  const depthM = obstacle.depthM !== undefined ? Number(obstacle.depthM || 0) : Number(obstacle.height || 0) / scale;
-  return obstacleAreaFromSize(widthM, depthM, obstacleShape(obstacle));
+  return boothMath.obstacleAreaSqm(db, obstacle);
 }
 
 function boothObstacleArea(db, booth) {
-  const total = (db.obstacles || [])
-    .filter((obstacle) => obstacle.type === "internal" && Number(obstacle.boothId) === Number(booth.id))
-    .reduce((sum, obstacle) => sum + obstacleAreaSqm(db, obstacle), 0);
-  return Number(Math.min(Number(booth.area || 0), total).toFixed(3));
+  return boothMath.boothObstacleArea(db, booth);
 }
 
 function boothBillableArea(db, booth) {
-  return Number(Math.max(0, Number(booth.area || 0) - boothObstacleArea(db, booth)).toFixed(3));
+  return boothMath.boothBillableArea(db, booth);
 }
 
 function boothPrice(db, booth) {
-  const billableArea = boothBillableArea(db, booth);
-  if (booth.attr === "raw") {
-    return Math.round(billableArea * Number(db.settings.rules.rawPrice || 0));
-  }
-  return Math.round(Number(db.settings.rules.standardPrice || 0) * (billableArea / 9));
+  return boothMath.boothPrice(db, booth);
 }
 
 function refreshBoothBilling(db, booth) {
@@ -1243,6 +1514,7 @@ function activeOrderUsesBooth(db, boothId) {
 
 function canDeleteBooth(db, booth) {
   if (!booth) return false;
+  if (booth.locked) return false;
   if (!["available", "disabled"].includes(booth.status)) return false;
   if (booth.orderId) return false;
   return !activeOrderUsesBooth(db, booth.id);
@@ -1366,10 +1638,10 @@ function findUserByToken(db, req, url) {
   return { user, token, session };
 }
 
-function canAccessOrder(user, order) {
+function canAccessOrder(db, user, order) {
   if (!user || !order) return false;
   if (isAdminLike(user)) return true;
-  if (user.role === "sales") return order.salespersonId === user.id;
+  if (user.role === "sales") return canAccessSalesOwner(db, user, order.salespersonId);
   return user.role === "enterprise" && order.id === user.orderId;
 }
 
@@ -1381,9 +1653,9 @@ function canAccessAttachment(db, user, attachment) {
   if (attachment.uploadedBy === user.id) return true;
   if (user.role === "sales") {
     if (attachment.leadId) {
-      return db.customerLeads.some((lead) => Number(lead.id) === Number(attachment.leadId) && Number(lead.ownerSalesId) === Number(user.id));
+      return db.customerLeads.some((lead) => Number(lead.id) === Number(attachment.leadId) && canAccessSalesOwner(db, user, lead.ownerSalesId));
     }
-    return db.orders.some((order) => order.salespersonId === user.id && attachment.orderId === order.id);
+    return db.orders.some((order) => canAccessOrder(db, user, order) && attachment.orderId === order.id);
   }
   if (user.role === "enterprise") {
     return attachment.orderId === user.orderId || attachment.companyId === user.companyId;
@@ -1494,24 +1766,7 @@ function orderNo(db) {
 }
 
 function recalcOrder(db, order) {
-  const approved = db.payments
-    .filter((payment) => payment.orderId === order.id && payment.status === "approved")
-    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-  order.paidApprovedAmount = approved;
-  order.depositRequired = Math.ceil(Number(order.totalAmount || 0) * Number(db.settings.rules.depositRate || 0));
-  if (isActiveOrder(order)) {
-    if (order.type === "booth" && approved >= order.depositRequired && order.totalAmount > 0) {
-      order.status = "sold";
-      order.boothIds.forEach((boothId) => {
-        const booth = db.booths.find((item) => item.id === boothId);
-        if (booth) booth.status = "sold";
-      });
-    } else if (db.payments.some((payment) => payment.orderId === order.id && payment.status === "pending")) {
-      order.status = "pending_payment_review";
-    } else {
-      order.status = "reserved";
-    }
-  }
+  return orderWorkflow.recalculateOrderStatus(db, order, isActiveOrder);
 }
 
 function ensureProfile(db, order) {
@@ -1691,6 +1946,29 @@ function applyChangeRequest(db, request) {
     return { ok: true, detail: `${order.orderNo} 已退订，展位已释放` };
   }
 
+  if (data.action === "special_order") {
+    if (!isActiveOrder(order)) return { ok: false, status: 409, error: "订单已经结束，不能转为特殊订单" };
+    if (order.status === "sold" && !order.specialApproved) return { ok: false, status: 409, error: "订单已经成交，无需转为特殊订单" };
+    if (Number(order.totalAmount || 0) <= 0) return { ok: false, status: 409, error: "订单金额为 0，不能申请特殊订单" };
+    order.specialApproved = true;
+    order.specialApprovedAt = nowIso();
+    order.specialRequestId = request.id;
+    order.status = "sold";
+    order.updatedAt = nowIso();
+    if (order.type === "booth") {
+      order.boothIds.forEach((boothId) => {
+        const booth = db.booths.find((item) => item.id === boothId && item.orderId === order.id);
+        if (booth) {
+          booth.status = "sold";
+          booth.updatedAt = nowIso();
+        }
+      });
+      ensureProfile(db, order);
+    }
+    markCustomerLeadConverted(db, order.eventId, order.companyId);
+    return { ok: true, detail: `${order.orderNo} 已通过特殊订单申请，计入成交但不增加到款金额` };
+  }
+
   return { ok: true, detail: `${order.orderNo} 变更已审核通过` };
 }
 
@@ -1721,12 +1999,13 @@ function buildBootstrap(db, user) {
   const eventLeads = db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId));
   const visibleLeads = isAdminLike(user)
     ? eventLeads
-    : eventLeads.filter((lead) => lead.status === "public" || Number(lead.ownerSalesId) === Number(user.id));
+    : eventLeads.filter((lead) => lead.status === "public" || canAccessSalesOwner(db, user, lead.ownerSalesId));
+  const eventLeadByCompany = new Map(eventLeads.map((lead) => [Number(lead.companyId), lead]));
   let orderIds = new Set();
   if (isAdminLike(user)) {
     orderIds = new Set(eventOrders.map((order) => order.id));
   } else if (user.role === "sales") {
-    orderIds = new Set(eventOrders.filter((order) => order.salespersonId === user.id).map((order) => order.id));
+    orderIds = new Set(eventOrders.filter((order) => canAccessOrder(db, user, order)).map((order) => order.id));
   } else if (user.role === "enterprise") {
     orderIds = new Set([user.orderId]);
   }
@@ -1741,14 +2020,16 @@ function buildBootstrap(db, user) {
     settings: visibleSettings,
     map: currentMap,
     eventRoles: isSuperAdmin(user) ? db.eventRoles : [],
-    customerLeads: visibleLeads,
+    customerLeads: visibleLeads.map((lead) => leadForUser(user, lead)),
     users: isAdminLike(user) ? safeUsers : safeUsers.filter((item) => item.role !== "enterprise"),
     booths: user.role === "enterprise" ? db.booths.filter((booth) => orderIds.has(booth.orderId)) : visibleEventBooths,
     obstacles: user.role === "enterprise" ? db.obstacles.filter((obstacle) => {
       const booth = db.booths.find((item) => item.id === obstacle.boothId);
       return String(obstacleEventId(db, obstacle)) === String(eventId) && (obstacle.type === "external" || (booth && orderIds.has(booth.orderId)));
     }) : visibleEventObstacles,
-    companies: db.companies.filter((company) => companyIds.has(company.id)),
+    companies: db.companies
+      .filter((company) => companyIds.has(company.id))
+      .map((company) => companyForUser(db, user, company, eventLeadByCompany.get(Number(company.id)))),
     orders: isAdminLike(user) ? eventOrders : db.orders.filter((order) => orderIds.has(order.id)),
     warehouseOrders: isAdminLike(user) ? warehouseOrders.map((order) => ({
       ...order,
@@ -1765,9 +2046,7 @@ function buildBootstrap(db, user) {
 }
 
 function boothEquivalentCount(booths) {
-  return Number((booths || []).reduce((sum, booth) => {
-    return sum + Number(booth.area || 0) / 9;
-  }, 0).toFixed(2));
+  return boothMath.boothEquivalentCount(booths);
 }
 
 function dashboard(db, user) {
@@ -1789,7 +2068,7 @@ function dashboard(db, user) {
     .filter(Boolean));
   const visibleBoothOrders = visibleOrders.filter((order) => order.type === "booth" && isActiveOrder(order));
   const reservedBoothCount = visibleBoothOrders
-    .filter((order) => Number(order.paidApprovedAmount || 0) <= 0)
+    .filter((order) => order.status !== "sold" && Number(order.paidApprovedAmount || 0) <= 0)
     .reduce((sum, order) => sum + orderBoothCount(order), 0);
   const departmentRows = new Map();
   visibleOrders.filter((order) => !isClosedOrderStatus(order.status)).forEach((order) => {
@@ -1817,7 +2096,7 @@ function dashboard(db, user) {
     const orderBooths = (order.boothIds || []).map((id) => boothsById.get(Number(id))).filter(Boolean);
     const count = boothEquivalentCount(orderBooths);
     row.boothCount += count;
-    if (count && Number(order.paidApprovedAmount || 0) <= 0) row.reservedBoothCount += count;
+    if (count && order.status !== "sold" && Number(order.paidApprovedAmount || 0) <= 0) row.reservedBoothCount += count;
     if (Number(order.paidApprovedAmount || 0) > 0) row.paidBoothCount += count;
     if (order.status === "sold") row.firstPaymentBoothCount += count;
     row.receivedAmount += Number(order.paidApprovedAmount || 0);
@@ -1914,9 +2193,31 @@ async function handleApi(req, res, url, body = {}) {
     return send(res, 200, { token: newToken, user: sanitizeUser({ ...found, role, eventId: event.id }) });
   }
 
+  if (pathname === "/api/auth/enterprise-link" && method === "POST") {
+    const accessToken = String(body.token || "").trim();
+    if (!accessToken) return sendError(res, 400, "链接参数不正确");
+    const order = db.orders.find((item) => item.enterpriseAccessToken === accessToken);
+    if (!order || order.type !== "booth" || order.status !== "sold") return sendError(res, 404, "企业链接不存在或订单尚未成交");
+    const expiresAt = new Date(order.enterpriseAccessExpiresAt || 0).getTime();
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return sendError(res, 410, "企业链接已过期，请联系业务员重新生成");
+    const event = eventById(db, order.eventId) || db.settings.event;
+    const enterpriseUser = ensureEnterpriseUserForOrder(db, order, "");
+    const newToken = randomToken();
+    db.sessions[newToken] = { userId: enterpriseUser.id, eventId: event.id, role: "enterprise", createdAt: nowIso(), loginBy: "enterprise-link" };
+    db.settings.event = event;
+    ensureEventMap(db, event.id);
+    enterpriseUser.lastLoginAt = nowIso();
+    writeLog(db, { ...enterpriseUser, role: "enterprise" }, "企业免登录链接进入", `${order.orderNo} / ${event.name}`, "order", order.id);
+    saveDb(db);
+    return send(res, 200, { token: newToken, user: sanitizeUser({ ...enterpriseUser, role: "enterprise", eventId: event.id }), expiresAt: order.enterpriseAccessExpiresAt });
+  }
+
   if (!user) return sendError(res, 401, "请先登录");
   applySessionEvent(db, session);
-  if (syncCustomerLeadsForCurrentEvent(db)) saveDb(db);
+  const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
+  const remindersChanged = syncWorkflowReminders(db);
+  const workflowChanged = leadsChanged || remindersChanged;
+  if (workflowChanged) saveDb(db);
 
   if (pathname === "/api/auth/logout" && method === "POST") {
     delete db.sessions[token];
@@ -2068,7 +2369,16 @@ async function handleApi(req, res, url, body = {}) {
 
   if (pathname === "/api/settings" && method === "PUT") {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
-    db.settings.rules = { ...db.settings.rules, ...(body.rules || {}) };
+    const incomingRules = body.rules || {};
+    const hasEnterpriseLinkDays = incomingRules.enterpriseLinkDays !== undefined;
+    db.settings.rules = { ...db.settings.rules, ...incomingRules };
+    if (hasEnterpriseLinkDays) {
+      const maxDays = enterpriseLinkMaxDays(db);
+      db.settings.rules.enterpriseLinkDays = clampEnterpriseLinkDays(db, incomingRules.enterpriseLinkDays);
+      db.settings.rules.enterpriseLinkDaysCustomized = incomingRules.enterpriseLinkDaysCustomized !== undefined
+        ? Boolean(incomingRules.enterpriseLinkDaysCustomized)
+        : Number(db.settings.rules.enterpriseLinkDays) < maxDays;
+    }
     if (body.workdaySync && body.workdaySync.sourceUrl) {
       db.settings.workdaySync = {
         ...(db.settings.workdaySync || {}),
@@ -2080,6 +2390,9 @@ async function handleApi(req, res, url, body = {}) {
     if (Array.isArray(body.salesTargets)) db.settings.salesTargets = normalizeSalesTargets(body.salesTargets);
     if (Array.isArray(body.departmentTargets)) db.settings.departmentTargets = normalizeDepartmentTargets(body.departmentTargets);
     if (Array.isArray(body.discountRules)) db.settings.discountRules = normalizeDiscountRules(body.discountRules);
+    if (Array.isArray(body.reviewRejectTemplates)) {
+      db.settings.reviewRejectTemplates = body.reviewRejectTemplates.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 20);
+    }
     if (Array.isArray(body.furniture)) {
       db.settings.furniture = body.furniture.map((item) => ({
         id: item.id || randomToken(5),
@@ -2128,7 +2441,7 @@ async function handleApi(req, res, url, body = {}) {
     const leadId = Number(body.leadId || 0);
     const lead = leadId ? db.customerLeads.find((item) => item.id === leadId && String(item.eventId) === String(db.settings.event.id)) : null;
     if (leadId && !lead) return sendError(res, 404, "客户不存在");
-    if (lead && !isAdminLike(user) && !(user.role === "sales" && Number(lead.ownerSalesId) === Number(user.id))) {
+    if (lead && !isAdminLike(user) && !canAccessSalesOwner(db, user, lead.ownerSalesId)) {
       return sendError(res, 403, "无权上传该客户附件");
     }
     if (["customer-contract", "customer-voucher"].includes(category)) {
@@ -2239,6 +2552,75 @@ async function handleApi(req, res, url, body = {}) {
     return send(res, 200, { map });
   }
 
+  if (pathname === "/api/map/snapshot" && method === "POST") {
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
+    const eventId = db.settings.event.id;
+    const incomingBooths = Array.isArray(body.booths) ? body.booths : [];
+    const incomingObstacles = Array.isArray(body.obstacles) ? body.obstacles : [];
+    const snapshotById = new Map(incomingBooths.map((booth) => [Number(booth.id), booth]));
+    const protectedBooths = eventBooths(db, eventId).filter((booth) => !canDeleteBooth(db, booth));
+    const changedProtected = protectedBooths.filter((booth) => {
+      const next = snapshotById.get(Number(booth.id));
+      if (!next) return true;
+      const keys = ["boothNo", "x", "y", "width", "height", "area", "widthM", "depthM", "hall", "zone", "attr", "status", "orderId", "reservedAt", "reservedBy"];
+      return keys.some((key) => String(next[key] ?? "") !== String(booth[key] ?? ""));
+    });
+    if (changedProtected.length) return sendError(res, 409, `有已预留/成交/锁定展位，不能通过撤销覆盖：${changedProtected.map((booth) => booth.boothNo).join(" / ")}`);
+    const boothIds = new Set();
+    const restoredBooths = incomingBooths.map((item) => {
+      const booth = {
+        id: Number(item.id || id(db, "booth")),
+        eventId,
+        boothNo: String(item.boothNo || "").trim() || `B${db.nextIds.booth}`,
+        x: Number(item.x || 0),
+        y: Number(item.y || 0),
+        width: Number(item.width || 60),
+        height: Number(item.height || 40),
+        area: Number(item.area || 9),
+        widthM: Number(item.widthM || 3),
+        depthM: Number(item.depthM || 3),
+        hall: String(item.hall || db.settings.halls[0] || "1号馆").trim(),
+        zone: String(item.zone || zoneName(db.settings.zones[0]) || "A区").trim(),
+        attr: item.attr === "raw" ? "raw" : "standard",
+        price: Number(item.price || 0),
+        status: ["available", "reserved", "pending_payment_review", "sold", "disabled"].includes(item.status) ? item.status : "available",
+        orderId: item.orderId || null,
+        reservedAt: item.reservedAt || null,
+        reservedBy: item.reservedBy || null,
+        locked: Boolean(item.locked),
+        updatedAt: nowIso()
+      };
+      boothIds.add(booth.id);
+      refreshBoothBilling(db, booth);
+      return booth;
+    });
+    const restoredObstacles = incomingObstacles.map((item) => ({
+      id: Number(item.id || id(db, "obstacle")),
+      eventId,
+      type: item.type === "internal" ? "internal" : "external",
+      shape: item.shape === "circle" ? "circle" : "rect",
+      boothId: item.type === "internal" && boothIds.has(Number(item.boothId)) ? Number(item.boothId) : null,
+      label: String(item.label || (item.type === "internal" ? "展位内障碍物" : "展位外障碍物")).trim(),
+      x: Number(item.x || 0),
+      y: Number(item.y || 0),
+      width: Number(item.width || 0),
+      height: Number(item.height || 0),
+      widthM: Number(item.widthM || 0),
+      depthM: Number(item.depthM || 0),
+      area: Number(item.area || 0),
+      createdAt: item.createdAt || nowIso(),
+      updatedAt: nowIso()
+    })).filter((item) => item.width > 0 && item.height > 0);
+    db.booths = db.booths.filter((booth) => String(booth.eventId || eventId) !== String(eventId)).concat(restoredBooths);
+    db.obstacles = db.obstacles.filter((obstacle) => String(obstacleEventId(db, obstacle)) !== String(eventId)).concat(restoredObstacles);
+    refreshAllBoothBilling(db);
+    db.nextIds.booth = Math.max(Number(db.nextIds.booth || 1), ...db.booths.map((booth) => Number(booth.id || 0) + 1), 1);
+    db.nextIds.obstacle = Math.max(Number(db.nextIds.obstacle || 1), ...db.obstacles.map((obstacle) => Number(obstacle.id || 0) + 1), 1);
+    writeLog(db, user, "恢复展位图快照", `${restoredBooths.length} 个展位 / ${restoredObstacles.length} 个障碍物`);
+    saveDb(db);
+    return send(res, 200, { booths: restoredBooths, obstacles: restoredObstacles });
+  }
+
   if (pathname === "/api/booths" && method === "POST") {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const booth = {
@@ -2260,6 +2642,7 @@ async function handleApi(req, res, url, body = {}) {
       orderId: null,
       reservedAt: null,
       reservedBy: null,
+      locked: false,
       updatedAt: nowIso()
     };
     refreshBoothBilling(db, booth);
@@ -2275,12 +2658,14 @@ async function handleApi(req, res, url, body = {}) {
     const booth = db.booths.find((item) => item.id === Number(boothMatch[1]) && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!booth) return sendError(res, 404, "展位不存在");
     if (booth.status === "sold") return sendError(res, 409, "已成交展位不可直接编辑");
+    if (booth.locked && body.locked !== false) return sendError(res, 409, "展位已锁定，请先解锁再编辑");
     ["boothNo", "hall", "zone", "attr", "status"].forEach((key) => {
       if (body[key] !== undefined) booth[key] = body[key];
     });
     ["x", "y", "width", "height", "area", "widthM", "depthM"].forEach((key) => {
       if (body[key] !== undefined) booth[key] = Number(body[key]);
     });
+    if (body.locked !== undefined) booth.locked = Boolean(body.locked);
     refreshBoothBilling(db, booth);
     booth.updatedAt = nowIso();
     writeLog(db, user, "编辑展位", booth.boothNo, "booth", booth.id);
@@ -2309,7 +2694,7 @@ async function handleApi(req, res, url, body = {}) {
       .map((item) => [Number(item.id), item]));
     const changed = [];
     ids.forEach((boothId) => {
-      const booth = db.booths.find((item) => item.id === boothId && item.status !== "sold" && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
+      const booth = db.booths.find((item) => item.id === boothId && item.status !== "sold" && !item.locked && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
       if (!booth) return;
       ["hall", "zone", "attr", "status"].forEach((key) => {
         if (patch[key] !== undefined) booth[key] = patch[key];
@@ -2620,7 +3005,7 @@ async function handleApi(req, res, url, body = {}) {
       customerType: "new",
       status: "protected",
       ownerSalesId,
-      protectedUntil: addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays || 30)),
+      protectedUntil: addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30)),
       sourceOrderId: null,
       sourceEventName: "",
       sourceAmount: 0,
@@ -2641,8 +3026,85 @@ async function handleApi(req, res, url, body = {}) {
       releasedAt: "",
       convertedAt: ""
     };
+    saveLeadContactVersion(db, lead, ownerSalesId, company);
     db.customerLeads.push(lead);
     writeLog(db, user, "新增新客户", company.name, "company", company.id);
+    saveDb(db);
+    return send(res, 200, { company, lead });
+  }
+
+  const companyUpdateMatch = pathname.match(/^\/api\/companies\/(\d+)$/);
+  if (companyUpdateMatch && method === "PUT") {
+    if (!requireRole(user, ["admin", "sales"])) return sendError(res, 403, "无权操作");
+    const eventId = db.settings.event.id;
+    const company = db.companies.find((item) => Number(item.id) === Number(companyUpdateMatch[1]));
+    if (!company) return sendError(res, 404, "企业不存在");
+    const lead = db.customerLeads.find((item) => (
+      String(item.eventId) === String(eventId)
+      && Number(item.companyId) === Number(company.id)
+      && item.customerType === "new"
+      && item.status === "protected"
+    ));
+    if (!lead) return sendError(res, 409, "只有未生成订单的新客户可以修改资料");
+    if (activeCurrentOrderForCompany(db, eventId, company.id)) {
+      return sendError(res, 409, "该企业已经生成有效订单，不能在新客户资料中修改");
+    }
+    if (user.role === "sales" && !canAccessSalesOwner(db, user, lead.ownerSalesId)) {
+      return sendError(res, 403, "无权修改该客户资料");
+    }
+
+    const submittedName = String(body.name || "").trim();
+    const submittedShortName = String(body.shortName || "").trim();
+    if (user.role === "sales") {
+      if (submittedName && companyNameKey(submittedName) !== companyNameKey(company.name)) {
+        return sendError(res, 403, "业务员不能修改企业名称");
+      }
+      if (submittedShortName && submittedShortName !== String(company.shortName || "").trim()) {
+        return sendError(res, 403, "业务员不能修改企业简称");
+      }
+    }
+    const name = user.role === "sales" ? String(company.name || "").trim() : submittedName;
+    const shortName = user.role === "sales" ? String(company.shortName || "").trim() : submittedShortName;
+    if (!name) return sendError(res, 400, "企业名称必填");
+    if (isAdminLike(user)) {
+      const nameConflict = db.companies.find((item) => Number(item.id) !== Number(company.id) && companyNameKey(item.name) === companyNameKey(name));
+      if (nameConflict) return sendError(res, 409, "企业名称已存在");
+    }
+    const taxNo = String(body.taxNo || "").trim();
+    const taxKey = companyTaxKey(taxNo);
+    if (taxKey && db.companies.some((item) => Number(item.id) !== Number(company.id) && companyTaxKey(item.taxNo) === taxKey)) {
+      return sendError(res, 409, "税号已存在");
+    }
+
+    const visibleBefore = companyForUser(db, user, company, lead);
+    const contactMasked = Boolean(visibleBefore.contactMasked);
+    const nextContactName = String(body.contactName || "").trim();
+    const nextPhone = String(body.phone || "").trim();
+    const shouldApplyContactToMaster = isAdminLike(user) || !contactMasked || nextContactName || nextPhone;
+
+    company.name = name;
+    company.shortName = shortName;
+    company.email = String(body.email || "").trim();
+    company.address = String(body.address || "").trim();
+    company.taxNo = taxNo;
+    company.locationType = body.locationType === "overseas" ? "overseas" : "domestic";
+    company.countryRegion = company.locationType === "overseas" ? String(body.countryRegion || "").trim() : "";
+    company.province = company.locationType === "overseas" ? "" : String(body.province || "").trim();
+    company.city = company.locationType === "overseas" ? "" : String(body.city || "").trim();
+    company.updatedAt = nowIso();
+    if (shouldApplyContactToMaster) {
+      company.contactName = nextContactName;
+      company.phone = nextPhone;
+    }
+    const contactOwnerId = user.role === "sales" ? user.id : lead.ownerSalesId;
+    const existingContactVersion = leadContactVersionForOwner(db, lead, contactOwnerId);
+    if (!contactMasked || nextContactName || nextPhone || existingContactVersion) {
+      saveLeadContactVersion(db, lead, contactOwnerId, {
+        contactName: nextContactName,
+        phone: nextPhone
+      });
+    }
+    writeLog(db, user, "修改新客户资料", company.name, "company", company.id);
     saveDb(db);
     return send(res, 200, { company, lead });
   }
@@ -2656,13 +3118,14 @@ async function handleApi(req, res, url, body = {}) {
     const ownerSalesId = user.role === "sales" ? user.id : (Number(body.ownerSalesId) || user.id);
     const capacity = ensureProtectionCapacity(db, db.settings.event.id, ownerSalesId);
     if (!capacity.ok) return sendError(res, 409, capacity.error);
+    const company = db.companies.find((item) => item.id === lead.companyId);
+    rememberLeadContactOwner(db, lead, lead.ownerSalesId || lead.previousOwnerSalesId);
     lead.status = "protected";
     lead.customerType = "new";
     lead.ownerSalesId = ownerSalesId;
-    lead.protectedUntil = addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays || 30));
+    lead.protectedUntil = addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30));
     lead.claimedAt = nowIso();
     lead.publicReason = "";
-    const company = db.companies.find((item) => item.id === lead.companyId);
     if (company) company.ownerSalesId = ownerSalesId;
     writeLog(db, user, "认领公海客户", company?.name || String(lead.companyId), "customerLead", lead.id);
     saveDb(db);
@@ -2675,10 +3138,11 @@ async function handleApi(req, res, url, body = {}) {
     const lead = db.customerLeads.find((item) => item.id === Number(customerLeadReleaseMatch[1]) && String(item.eventId) === String(db.settings.event.id));
     if (!lead) return sendError(res, 404, "客户不存在");
     if (lead.status !== "protected") return sendError(res, 409, "只有保护中的客户可以下保");
-    if (user.role === "sales" && Number(lead.ownerSalesId) !== Number(user.id)) return sendError(res, 403, "只能下保自己的客户");
+    if (user.role === "sales" && !canAccessSalesOwner(db, user, lead.ownerSalesId)) return sendError(res, 403, "无权下保该客户");
     if (activeCurrentOrderForCompany(db, db.settings.event.id, lead.companyId)) {
       return sendError(res, 409, "该客户已有有效订单，请先在参展企业列表中走退订或订单变更流程");
     }
+    rememberLeadContactOwner(db, lead, lead.ownerSalesId);
     lead.status = "public";
     lead.releasedAt = nowIso();
     lead.protectedUntil = "";
@@ -2845,7 +3309,7 @@ async function handleApi(req, res, url, body = {}) {
   const orderPaymentMatch = pathname.match(/^\/api\/orders\/(\d+)\/payments$/);
   if (orderPaymentMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(orderPaymentMatch[1]));
-    if (!canAccessOrder(user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
     const leadForOrder = db.customerLeads.find((lead) => String(lead.eventId) === String(order.eventId) && Number(lead.companyId) === Number(order.companyId));
     if (leadForOrder && salesFlowMode(db) === "contract_first" && leadForOrder.contractReviewStatus !== "approved") {
       return sendError(res, 409, "当前销售流程要求合同审核通过后才能上传水单");
@@ -2908,41 +3372,39 @@ async function handleApi(req, res, url, body = {}) {
   const enterpriseAccountMatch = pathname.match(/^\/api\/orders\/(\d+)\/enterprise-account$/);
   if (enterpriseAccountMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(enterpriseAccountMatch[1]));
-    if (!canAccessOrder(user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
     if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "只有成交的展位订单可以生成企业账号");
-    const company = db.companies.find((item) => item.id === order.companyId);
     const password = simpleEnterprisePassword();
-    let enterpriseUser = db.users.find((item) => item.id === order.enterpriseUserId);
-    if (!enterpriseUser) {
-      enterpriseUser = {
-        id: id(db, "user"),
-        username: `ent${order.orderNo.toLowerCase()}`,
-        passwordHash: hashPassword(password),
-        displayName: company ? company.name : `企业${order.id}`,
-        role: "enterprise",
-        active: true,
-        companyId: order.companyId,
-        orderId: order.id,
-        createdAt: nowIso(),
-        lastLoginAt: null
-      };
-      db.users.push(enterpriseUser);
-      order.enterpriseUserId = enterpriseUser.id;
-      order.enterpriseAccountIssuedAt = nowIso();
-    } else {
-      enterpriseUser.passwordHash = hashPassword(password);
-      enterpriseUser.active = true;
-    }
-    ensureProfile(db, order);
+    const enterpriseUser = ensureEnterpriseUserForOrder(db, order, password);
     writeLog(db, user, "生成企业账号", `${order.orderNo} ${enterpriseUser.username}`, "user", enterpriseUser.id);
     saveDb(db);
     return send(res, 200, { username: enterpriseUser.username, password });
   }
 
+  const enterpriseLinkMatch = pathname.match(/^\/api\/orders\/(\d+)\/enterprise-link$/);
+  if (enterpriseLinkMatch && method === "POST") {
+    const order = db.orders.find((item) => item.id === Number(enterpriseLinkMatch[1]));
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "只有成交的展位订单可以生成企业免登录链接");
+    const eventLinkDefaultDays = enterpriseLinkMaxDays(db);
+    const days = clampEnterpriseLinkDays(db, body.days || db.settings.rules.enterpriseLinkDays || eventLinkDefaultDays);
+    const enterpriseUser = ensureEnterpriseUserForOrder(db, order);
+    order.enterpriseAccessToken = randomToken(24);
+    order.enterpriseAccessExpiresAt = new Date(Date.now() + days * 86400000).toISOString();
+    order.enterpriseLinkIssuedAt = nowIso();
+    order.enterpriseLinkIssuedBy = user.id;
+    const protocol = String(req.headers["x-forwarded-proto"] || "http").split(",")[0];
+    const host = req.headers.host || `localhost:${PORT}`;
+    const link = `${protocol}://${host}/?enterpriseToken=${encodeURIComponent(order.enterpriseAccessToken)}`;
+    writeLog(db, user, "生成企业免登录链接", `${order.orderNo} ${days} 天有效`, "user", enterpriseUser.id);
+    saveDb(db);
+    return send(res, 200, { link, expiresAt: order.enterpriseAccessExpiresAt, username: enterpriseUser.username });
+  }
+
   const changeRequestMatch = pathname.match(/^\/api\/orders\/(\d+)\/change-requests$/);
   if (changeRequestMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(changeRequestMatch[1]));
-    if (!canAccessOrder(user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
     const request = {
       id: id(db, "changeRequest"),
       orderId: order.id,
@@ -2972,6 +3434,20 @@ async function handleApi(req, res, url, body = {}) {
       if (isClosedOrderStatus(order.status)) return sendError(res, 409, "订单已经结束");
       request.detail = request.detail || `退订展位：${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ") || order.orderNo}`;
     }
+    if (request.changeData.action === "special_order") {
+      if (user.role !== "sales") return sendError(res, 403, "只有业务员可以提交特殊订单申请");
+      if (!isActiveOrder(order) || order.status === "sold") return sendError(res, 409, "订单已经成交或结束，不能申请特殊订单");
+      if (order.specialApproved) return sendError(res, 409, "该订单已经是特殊订单");
+      if (Number(order.totalAmount || 0) <= 0) return sendError(res, 409, "订单金额为 0，不能申请特殊订单");
+      const exists = db.changeRequests.some((item) => (
+        item.orderId === order.id
+        && item.status === "pending"
+        && item.changeData?.action === "special_order"
+      ));
+      if (exists) return sendError(res, 409, "该订单已有待审核特殊订单申请");
+      request.type = "特殊订单申请";
+      request.detail = request.detail || "客户付款进度较慢，申请特殊成交";
+    }
     db.changeRequests.push(request);
     writeLog(db, user, "提交订单变更申请", `${order.orderNo} ${request.type}`, "order", order.id);
     eventAdminUsers(db, order.eventId).forEach((admin) => notify(db, admin.id, "待审核订单变更", `${order.orderNo} ${request.type}`));
@@ -2996,6 +3472,10 @@ async function handleApi(req, res, url, body = {}) {
     request.reviewedBy = user.id;
     request.reviewedAt = nowIso();
     request.reviewRemark = reviewRemarkFromBody(body);
+    if (nextStatus === "approved" && request.changeData?.action === "special_order") {
+      const order = db.orders.find((item) => item.id === request.orderId);
+      if (order) order.specialApprovedBy = user.id;
+    }
     writeLog(db, user, "审核订单变更申请", `${request.type} ${request.status}`, "changeRequest", request.id);
     const order = db.orders.find((item) => item.id === request.orderId);
     if (order) notify(db, order.salespersonId, "订单变更审核结果", `${order.orderNo} ${request.type} ${request.status === "approved" ? "已通过" : "已驳回"}`);
@@ -3005,10 +3485,10 @@ async function handleApi(req, res, url, body = {}) {
 
   if (pathname === "/api/jobs/release" && method === "POST") {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
-    const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
+    const jobLeadsChanged = syncCustomerLeadsForCurrentEvent(db);
     const released = releaseExpiredOrders(db, user);
     saveDb(db);
-    return send(res, 200, { releasedCount: released.length, released, leadsChanged });
+    return send(res, 200, { releasedCount: released.length, released, leadsChanged: leadsChanged || jobLeadsChanged });
   }
 
   if (pathname === "/api/exhibitor/profile" && method === "PUT") {
@@ -3047,8 +3527,11 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const profile = db.profiles.find((item) => item.orderId === user.orderId);
     if (!profile) return sendError(res, 404, "资料不存在");
+    const badge = profile.badges.find((item) => item.id === badgeDeleteMatch[1]);
+    if (!badge) return sendError(res, 404, "参展证不存在");
     profile.badges = profile.badges.filter((item) => item.id !== badgeDeleteMatch[1]);
     profile.updatedAt = nowIso();
+    writeLog(db, user, "删除参展证信息", `${badge.name || ""}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
@@ -3085,6 +3568,20 @@ async function handleApi(req, res, url, body = {}) {
     });
     profile.updatedAt = nowIso();
     writeLog(db, user, "提交展具增租", `${furniture.name} x ${body.qty || 1}`, "profile", profile.id);
+    saveDb(db);
+    return send(res, 200, { profile });
+  }
+
+  const rentalDeleteMatch = pathname.match(/^\/api\/exhibitor\/rentals\/([a-f0-9]+)$/);
+  if (rentalDeleteMatch && method === "DELETE") {
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
+    const profile = db.profiles.find((item) => item.orderId === user.orderId);
+    if (!profile) return sendError(res, 404, "资料不存在");
+    const rental = profile.rentals.find((item) => item.id === rentalDeleteMatch[1]);
+    if (!rental) return sendError(res, 404, "展具增租申请不存在");
+    profile.rentals = profile.rentals.filter((item) => item.id !== rentalDeleteMatch[1]);
+    profile.updatedAt = nowIso();
+    writeLog(db, user, "删除展具增租", `${rental.furnitureName} x ${rental.qty}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
@@ -3129,7 +3626,7 @@ async function handleApi(req, res, url, body = {}) {
     const eventId = db.settings.event.id;
     const orders = isAdminLike(user)
       ? db.orders.filter((order) => String(order.eventId || eventId) === String(eventId))
-      : db.orders.filter((order) => canAccessOrder(user, order));
+      : db.orders.filter((order) => canAccessOrder(db, user, order));
     const rows = [["订单号", "类型", "企业", "业务员", "展馆", "展位", "总金额", "已审核收款", "首款要求", "状态", "预留到期"]];
     orders.forEach((order) => {
       const company = db.companies.find((item) => item.id === order.companyId);
@@ -3164,7 +3661,7 @@ async function handleApi(req, res, url, body = {}) {
       return order && String(order.eventId || eventId) === String(eventId);
     }) : db.profiles.filter((profile) => {
       const order = db.orders.find((item) => item.id === profile.orderId);
-      return canAccessOrder(user, order);
+      return canAccessOrder(db, user, order);
     });
     const rows = [["订单号", "企业", "企业介绍", "产品介绍", "参展证人数", "楣板状态", "楣板修改", "展具申请数"]];
     profiles.forEach((profile) => {
@@ -3235,8 +3732,20 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+async function runWorkflowMaintenance() {
+  await withApiLock(() => {
+    const db = loadDb();
+    const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
+    const remindersChanged = syncWorkflowReminders(db);
+    if (leadsChanged || remindersChanged) saveDb(db);
+  });
+}
+
 server.listen(PORT, () => {
   console.log(`Expo Sales MVP running at http://localhost:${PORT}`);
-  console.log(`Database driver: ${DB_DRIVER}`);
   console.log("Demo accounts: admin/admin123, sales01/sales123");
+  runWorkflowMaintenance().catch((error) => console.error("workflow maintenance failed", error));
+  setInterval(() => {
+    runWorkflowMaintenance().catch((error) => console.error("workflow maintenance failed", error));
+  }, 10 * 60 * 1000);
 });

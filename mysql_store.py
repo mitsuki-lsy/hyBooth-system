@@ -34,6 +34,9 @@ RELATIONAL_TABLES = [
 def load_pymysql():
     try:
         import pymysql
+        if not hasattr(pymysql, "connect"):
+            module_path = getattr(pymysql, "__file__", "unknown location")
+            raise RuntimeError(f"PyMySQL 安装异常，当前加载的是 {module_path}，但缺少 connect()")
         return pymysql
     except ModuleNotFoundError as exc:
         raise RuntimeError("缺少 MySQL 驱动 PyMySQL，请先运行 python -m pip install -r requirements.txt") from exc
@@ -139,6 +142,8 @@ def connect_without_database(pymysql, config):
         user=config["user"],
         password=config["password"],
         charset="utf8mb4",
+        use_unicode=True,
+        init_command="SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
         autocommit=True,
         connect_timeout=10,
         ssl=config["ssl"],
@@ -153,6 +158,8 @@ def connect_database(pymysql, config):
         password=config["password"],
         database=config["database"],
         charset="utf8mb4",
+        use_unicode=True,
+        init_command="SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
         autocommit=True,
         connect_timeout=10,
         ssl=config["ssl"],
