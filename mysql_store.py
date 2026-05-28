@@ -18,6 +18,7 @@ RELATIONAL_TABLES = [
     "expo_change_requests",
     "expo_notifications",
     "expo_audit_logs",
+    "expo_activity_areas",
     "expo_obstacles",
     "expo_booths",
     "expo_attachments",
@@ -379,6 +380,23 @@ def create_schema(cur):
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS expo_activity_areas (
+          id INT NOT NULL PRIMARY KEY,
+          event_id VARCHAR(64) NOT NULL,
+          name VARCHAR(191) NOT NULL DEFAULT '',
+          x DOUBLE NOT NULL DEFAULT 0,
+          y DOUBLE NOT NULL DEFAULT 0,
+          width DOUBLE NOT NULL DEFAULT 0,
+          height DOUBLE NOT NULL DEFAULT 0,
+          created_at VARCHAR(64) NOT NULL DEFAULT '',
+          updated_at VARCHAR(64) NULL,
+          extra_json LONGTEXT NULL,
+          INDEX idx_activity_area_event (event_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS expo_customer_leads (
           id INT NOT NULL PRIMARY KEY,
           event_id VARCHAR(64) NOT NULL,
@@ -672,6 +690,7 @@ def read_state(conn):
             "customerLeads": [],
             "booths": [],
             "obstacles": [],
+            "activityAreas": [],
             "companies": [],
             "orders": [],
             "payments": [],
@@ -828,6 +847,22 @@ def read_state(conn):
                 "widthM": float_value(row["width_m"]),
                 "depthM": float_value(row["depth_m"]),
                 "area": float_value(row["area"]),
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }, row.get("extra_json"))
+            for row in cur.fetchall()
+        ]
+
+        cur.execute("SELECT * FROM expo_activity_areas ORDER BY id")
+        db["activityAreas"] = [
+            merge_extra({
+                "id": int(row["id"]),
+                "eventId": row["event_id"],
+                "name": row["name"],
+                "x": float_value(row["x"]),
+                "y": float_value(row["y"]),
+                "width": float_value(row["width"]),
+                "height": float_value(row["height"]),
                 "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],
             }, row.get("extra_json"))
@@ -1219,6 +1254,22 @@ def write_state(conn, raw):
                 )
                 for obstacle in db.get("obstacles", [])
                 if int_or_none(obstacle.get("id"))
+            ])
+            replace_rows(cur, "expo_activity_areas", ["id", "event_id", "name", "x", "y", "width", "height", "created_at", "updated_at", "extra_json"], [
+                (
+                    int(area.get("id") or 0),
+                    area.get("eventId") or settings.get("event", {}).get("id", ""),
+                    area.get("name") or "",
+                    float_value(area.get("x")),
+                    float_value(area.get("y")),
+                    float_value(area.get("width")),
+                    float_value(area.get("height")),
+                    area.get("createdAt") or "",
+                    area.get("updatedAt"),
+                    json_text(extra_json(area, {"id", "eventId", "name", "x", "y", "width", "height", "createdAt", "updatedAt"})),
+                )
+                for area in db.get("activityAreas", [])
+                if int_or_none(area.get("id"))
             ])
 
             replace_rows(cur, "expo_customer_leads", ["id", "event_id", "company_id", "customer_type", "status", "owner_sales_id", "protected_until", "source_order_id", "source_event_name", "source_amount", "contract_review_status", "contract_reviewed_by", "contract_reviewed_at", "contract_review_remark", "voucher_review_status", "voucher_reviewed_by", "voucher_reviewed_at", "voucher_review_remark", "voucher_due_at", "public_reason", "created_at", "claimed_at", "released_at", "converted_at", "extra_json"], [

@@ -46,8 +46,10 @@ const App = (() => {
     mapRedoStack: [],
     boothSizePreviewHistoryId: null,
     obstacleSizePreviewHistoryId: null,
+    activityAreaSizePreviewHistoryId: null,
     mapDragSnapshot: null,
     mapObstacleDragSnapshot: null,
+    mapActivityAreaDragSnapshot: null,
     customerDraft: {
       name: "",
       shortName: "",
@@ -110,6 +112,9 @@ const App = (() => {
     obstacleShape: "rect",
     selectedObstacleId: null,
     suppressObstacleClick: false,
+    activityAreaMode: false,
+    activityAreaDrawing: null,
+    selectedActivityAreaId: null,
     dragging: null,
     drawMode: false,
     countdownTimer: null
@@ -397,7 +402,8 @@ const App = (() => {
   function cloneMapSnapshot() {
     return {
       booths: JSON.parse(JSON.stringify(state.data?.booths || [])),
-      obstacles: JSON.parse(JSON.stringify(state.data?.obstacles || []))
+      obstacles: JSON.parse(JSON.stringify(state.data?.obstacles || [])),
+      activityAreas: JSON.parse(JSON.stringify(state.data?.activityAreas || []))
     };
   }
 
@@ -419,6 +425,7 @@ const App = (() => {
       state.selectedBoothId = null;
       state.selectedBoothIds.clear();
       state.selectedObstacleId = null;
+      state.selectedActivityAreaId = null;
       render();
       restoreMapScroll(scroll);
     }
@@ -469,9 +476,36 @@ const App = (() => {
     return discountRules().find((rule) => String(rule.id) === String(state.orderDraft.discountRuleId)) || null;
   }
 
+  function discountAmountForRule(subtotal, ruleId) {
+    const rule = discountRules().find((item) => String(item.id) === String(ruleId));
+    return rule ? Math.min(Number(subtotal || 0), Number(rule.price || 0)) : 0;
+  }
+
   function discountAmountFor(subtotal) {
     const rule = selectedDiscountRule();
-    return rule ? Math.min(Number(subtotal || 0), Number(rule.price || 0)) : 0;
+    return rule ? discountAmountForRule(subtotal, rule.id) : 0;
+  }
+
+  function boothSelectionAmount(booths, discountRuleId = null) {
+    const subtotal = booths.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
+    const discountAmount = discountRuleId
+      ? discountAmountForRule(subtotal, discountRuleId)
+      : discountAmountFor(subtotal);
+    const total = Math.max(0, subtotal - discountAmount);
+    const deposit = Math.ceil(total * Number(state.data?.settings?.rules?.depositRate || 0));
+    return { subtotal, discountAmount, total, deposit };
+  }
+
+  function boothSelectionAmountText(booths, discountRuleId = null) {
+    const amount = boothSelectionAmount(booths, discountRuleId);
+    const parts = [
+      `已选 ${booths.length} 个展位`,
+      `小计 ${money(amount.subtotal)}`
+    ];
+    if (amount.discountAmount > 0) parts.push(`优惠 ${money(amount.discountAmount)}`);
+    parts.push(`订单金额 ${money(amount.total)}`);
+    parts.push(`首款 ${money(amount.deposit)}`);
+    return parts.join("；");
   }
 
   function countryRegions() {
@@ -640,8 +674,8 @@ const App = (() => {
         <div class="grid two">
           <label>${requiredLabel("企业名称")}<input id="edit-company-name" value="${h(company.name || "")}" ${identityReadonly} required></label>
           <label>企业简称<input id="edit-company-short-name" value="${h(company.shortName || "")}" ${identityReadonly}></label>
-          <label>联系人<input id="edit-company-contact" value="${h(company.contactName || "")}" placeholder="${company.contactMasked ? "领取后可填写新的联系人" : ""}"></label>
-          <label>手机<input id="edit-company-phone" value="${h(company.phone || "")}" placeholder="${company.contactMasked ? "领取后可填写新的手机号" : ""}"></label>
+          <label>联系人<input id="edit-company-contact" value="${h(company.contactName || "")}" placeholder="${company.contactMasked ? "联系方式已脱敏" : ""}"></label>
+          <label>手机<input id="edit-company-phone" value="${h(company.phone || "")}" placeholder="${company.contactMasked ? "联系方式已脱敏" : ""}"></label>
           <label>邮箱<input id="edit-company-email" value="${h(company.email || "")}"></label>
           <label>税号<input id="edit-company-tax" value="${h(company.taxNo || "")}"></label>
           <label>企业所在地<select id="edit-company-location-type" onchange="App.refreshCompanyEditLocation()">
@@ -654,7 +688,7 @@ const App = (() => {
           <label class="span-2">地址<input id="edit-company-address" value="${h(company.address || "")}"></label>
         </div>
         ${identityReadonly ? `<div class="hint">企业名称和企业简称仅管理员可修改。</div>` : ""}
-        ${company.contactMasked ? `<div class="hint">该客户来自公海，原联系人和手机号已按客户保护规则隐藏。你可以在这里填写新的联系方式，管理员仍可追溯原始数据。</div>` : ""}
+        ${company.contactMasked ? `<div class="hint">联系人和手机号已按联系方式脱敏规则隐藏。</div>` : ""}
         <div class="split-actions" style="margin-top:14px">
           <button onclick="App.saveCompanyEdit(${Number(company.id)})">保存资料</button>
           <button class="secondary" onclick="App.cancelCompanyEdit()">取消</button>
@@ -668,7 +702,7 @@ const App = (() => {
     const owner = getUser(company.ownerSalesId || lead?.ownerSalesId);
     return `
       <div class="detail-grid">
-        ${company.contactMasked ? `<div class="span-2"><span>联系方式保护</span><strong>原联系人和手机号已隐藏，可在编辑资料中录入新的联系方式</strong></div>` : ""}
+        ${company.contactMasked ? `<div class="span-2"><span>联系方式保护</span><strong>联系人和手机号已按脱敏规则隐藏</strong></div>` : ""}
         <div><span>企业简称</span><strong>${h(companyShortNameText(company))}</strong></div>
         <div><span>企业所在地</span><strong>${h(companyLocationText(company) || "-")}</strong></div>
         <div><span>联系人</span><strong>${h(company.contactName || "-")}</strong></div>
@@ -981,6 +1015,19 @@ const App = (() => {
       .join("");
   }
 
+  function eventOrderCount(eventId) {
+    return (state.data?.orders || []).filter((order) => String(order.eventId) === String(eventId)).length;
+  }
+
+  function userOrderCount(userId) {
+    const idValue = Number(userId);
+    const user = (state.data?.users || []).find((item) => Number(item.id) === idValue);
+    return (state.data?.orders || []).filter((order) => (
+      Number(order.salespersonId) === idValue
+      || Number(order.enterpriseUserId) === idValue
+    )).length + (user?.orderId ? 1 : 0);
+  }
+
   function settingsTab() {
     const tabs = ["workflow", "targets", "pricing", "venue", "workdays", "furniture"];
     return tabs.includes(state.settingsTab) ? state.settingsTab : "workflow";
@@ -1028,11 +1075,25 @@ const App = (() => {
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
-  function nextBoothNo() {
+  function normalizedDrawBoothNoConfig() {
     const prefix = String(state.drawBoothNoPrefix || "").trim();
-    const totalChars = Math.max(prefix.length + 1, Number(state.drawBoothNoChars || 0) || 4);
+    const rawChars = Math.floor(Number(state.drawBoothNoChars || 0) || 4);
+    const maxTotalChars = Math.max(prefix.length + 1, 12);
+    let totalChars = Math.max(prefix.length + 1, rawChars);
+    let startNo = Math.max(0, Number(state.drawBoothNoStart || 0) || 1);
+    let correctedFromNumber = false;
+    if (totalChars > maxTotalChars) {
+      startNo = totalChars;
+      totalChars = Math.max(prefix.length + String(startNo).length, prefix.length + 1, 4);
+      correctedFromNumber = true;
+    }
+    totalChars = Math.min(totalChars, maxTotalChars);
     const numericWidth = Math.max(1, totalChars - prefix.length);
-    const startNo = Math.max(0, Number(state.drawBoothNoStart || 0) || 1);
+    return { prefix, totalChars, numericWidth, startNo, correctedFromNumber };
+  }
+
+  function nextBoothNo() {
+    const { prefix, numericWidth, startNo } = normalizedDrawBoothNoConfig();
     const step = state.drawBoothNoSkipEnabled === "yes" ? Math.max(1, Number(state.drawBoothNoStep || 0) || 1) : 1;
     const pattern = new RegExp(`^${escapeRegExp(prefix)}(\\d+)$`);
     const formatNo = (number) => `${prefix}${String(number).padStart(numericWidth, "0")}`;
@@ -1060,6 +1121,17 @@ const App = (() => {
     const keyword = String(value || "").trim().toLowerCase();
     if (!keyword) return null;
     return state.data.booths.find((booth) => String(booth.boothNo).trim().toLowerCase() === keyword) || null;
+  }
+
+  function boothNoValidationError(value, currentBoothId = null) {
+    const boothNo = String(value || "").trim();
+    if (!boothNo) return "展位号不能为空";
+    if (/\s/.test(String(value || ""))) return "展位号不能包含空格";
+    const duplicate = (state.data?.booths || []).find((booth) => (
+      Number(booth.id) !== Number(currentBoothId)
+      && String(booth.boothNo || "").trim().toLowerCase() === boothNo.toLowerCase()
+    ));
+    return duplicate ? `展位号 ${boothNo} 已存在，不能重复` : "";
   }
 
   function scrollModalMapToBooth(mapId, booth) {
@@ -1127,14 +1199,31 @@ const App = (() => {
         const body = await response.json();
         message = body.error || message;
       }
-      throw new Error(message);
+      throw new Error(cleanErrorMessage(message, response.status));
     }
     if (contentType.includes("application/json")) return response.json();
     return response;
   }
 
+  function looksMojibake(value) {
+    return /[�]|[璇鏃浼瀹鎵鍙鍚绋閮灞闄妯鍥鐢璐鍒姘椤缂绾]/.test(String(value || ""));
+  }
+
+  function cleanErrorMessage(message, status = 0) {
+    const text = String(message || "").trim();
+    if (!looksMojibake(text)) return text;
+    if (status === 400) return "请求参数不正确，请检查后重试";
+    if (status === 401) return "登录信息不正确，请重新登录";
+    if (status === 403) return "无权操作";
+    if (status === 404) return "数据不存在";
+    if (status === 409) return "当前操作无法完成，请检查数据状态";
+    if (status >= 500) return "服务器错误，请稍后重试";
+    return "操作失败，请检查后重试";
+  }
+
   async function refresh() {
     state.data = await api("/api/bootstrap");
+    state.data.activityAreas = Array.isArray(state.data.activityAreas) ? state.data.activityAreas : [];
   }
 
   async function loadLoginEvents() {
@@ -1148,17 +1237,19 @@ const App = (() => {
     }
   }
 
-  async function run(action, success) {
+  async function run(action, success, options = {}) {
     state.error = "";
     state.message = "";
     try {
       const result = await action();
-      await refresh();
+      if (options.refresh !== false) await refresh();
+      if (typeof options.apply === "function") options.apply(result);
       state.message = success || "操作成功";
       render();
       return result;
     } catch (error) {
       state.error = error.message || "操作失败";
+      state.error = cleanErrorMessage(state.error || "操作失败");
       render();
       return null;
     }
@@ -1197,6 +1288,7 @@ const App = (() => {
       ["sales-map", "销售展位图"],
       ["exhibitor", "企业展务"]
     ];
+    common.push(["accounts", "账号管理"]);
     if (isAdminLikeRole(role)) {
       const eventChildren = [
         ["event-info", "展会信息"],
@@ -1213,7 +1305,8 @@ const App = (() => {
             ["old-customers", "老客户列表"],
             ["new-customers", "新客户列表"],
             ["customer-pool", "客户公海"],
-            ["exhibitor-list", "参展企业列表"]
+            ["exhibitor-list", "参展企业列表"],
+            ["data-warehouse", "数据总仓"]
           ]
         },
         {
@@ -1221,13 +1314,12 @@ const App = (() => {
           label: "展会相关",
           children: eventChildren
         },
-        ["data-warehouse", "数据总仓"],
         ["map", "展位图管理"],
         ["sales-map", "销售展位图"],
         ["approvals", "审核"],
         ["exhibitor", "企业展务模块"]
       ];
-      if (isSuperAdminRole(role)) adminMenu.push(["accounts", "账号管理"]);
+      adminMenu.push(["accounts", "账号管理"]);
       return adminMenu;
     }
     return common;
@@ -1298,14 +1390,14 @@ const App = (() => {
           <p>覆盖展位图绘制、业务员预留、收款水单审核、成交判定、企业展务填报、会刊/证件/楣板/展具汇总和经营看板。当前版本使用本地数据文件和本地附件目录，方便先跑通业务闭环。</p>
         </section>
         <section class="login-panel">
-          <form class="login-card" onsubmit="App.login(event)">
+          <form class="login-card" autocomplete="off" onsubmit="App.login(event)">
             <h2>登录系统</h2>
             ${state.error ? `<div class="error">${h(state.error)}</div>` : ""}
             <div class="grid">
               <label>展会类别<select id="login-event-category" onchange="App.setLoginEventCategory(this.value)">${categoryOptions}</select></label>
               <label>登录展会<select id="login-event" ${state.loginEventCategory ? "" : "disabled"}>${eventOptions}</select></label>
-              <label>账号<input id="login-username" value="admin" autocomplete="username"></label>
-              <label>密码<input id="login-password" type="password" value="admin123" autocomplete="current-password"></label>
+              <label>账号<input id="login-username" autocomplete="off"></label>
+              <label>密码<input id="login-password" type="password" autocomplete="new-password"></label>
               <button type="submit">登录</button>
             </div>
           </form>
@@ -2089,7 +2181,7 @@ const App = (() => {
       <section class="section">
         <h2>展会信息</h2>
         <div class="grid two">
-          <label>${requiredLabel("展会编号")}<input id="event-id" value="${h(event.id || "")}" ${readonly ? "disabled" : ""}></label>
+          <label>${requiredLabel("展会编号")}<input id="event-id" value="${h(event.id || "")}" disabled></label>
           <label>${requiredLabel("展会名称")}<input id="event-name" value="${h(event.name || "")}" ${readonly ? "disabled" : ""}></label>
           <label>开始时间<input id="event-start" type="date" value="${h(event.startDate || "")}" ${readonly ? "disabled" : ""}></label>
           <label>结束时间<input id="event-end" type="date" value="${h(event.endDate || "")}" ${readonly ? "disabled" : ""}></label>
@@ -2103,7 +2195,7 @@ const App = (() => {
         </div>
         <p class="hint">关联历史展会和展会类别由超级管理员维护；相同展会类别会共用同一个数据总仓。</p>
         ${readonly ? "" : `<div class="split-actions" style="margin-top:14px">
-          <button onclick="App.saveEventInfo()">保存展会信息</button>
+          <button onclick="App.saveEventInfo()">保存所属项目展会信息</button>
         </div>`}
       </section>
     `;
@@ -2129,12 +2221,14 @@ const App = (() => {
   function eventRoleActionButtons(index, event) {
     const managerCount = eventRoleIds(event.id, "manager").length;
     const salesCount = eventRoleIds(event.id, "sales").length;
+    const orders = eventOrderCount(event.id);
+    const actionHtml = "";
     return `
       <div class="event-role-actions">
         <button class="tiny secondary" onclick="App.openEventRoleModal(${index}, 'manager')">管理员 ${managerCount}</button>
         <button class="tiny secondary" onclick="App.openEventRoleModal(${index}, 'sales')">业务员 ${salesCount}</button>
       </div>
-    `;
+    `.replace("</div>", `${actionHtml}</div>`);
   }
 
   function eventRoleAssignmentsAfterUpdate(eventId, role, selectedIds) {
@@ -2241,7 +2335,15 @@ const App = (() => {
           <div class="field-actions"><button onclick="App.addEventCategory()">新增类别</button></div>
         </div>
         <div class="tag-list" style="margin-top:12px">
-          ${categories.map((category) => `<span class="count-pill">${h(category)}</span>`).join("")}
+          ${categories.map((category) => {
+            const eventCount = events.filter((event) => eventCategoryName(event) === category).length;
+            return `
+              <span class="count-pill">
+                ${h(category)}
+                ${eventCount ? `<small>${eventCount}</small>` : `<button class="tiny danger" onclick="App.deleteEventCategory(${h(JSON.stringify(category))})">删除</button>`}
+              </span>
+            `;
+          }).join("")}
         </div>
       </section>
       <section class="section">
@@ -2255,7 +2357,7 @@ const App = (() => {
         <p class="hint">展会编号用于隔离展位、订单、客户公海、老客户和数据总仓；只有选择关联展会后，历史成交客户才会进入新展会老客户列表。</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>展会编号</th><th>展会名称</th><th>展会类别</th><th>展会时间</th><th>地点</th><th>关联展会</th><th>管理员账号</th><th>业务员账号</th><th>账号权限</th></tr></thead>
+            <thead><tr><th>展会编号</th><th>展会名称</th><th>展会类别</th><th>展会时间</th><th>地点</th><th>关联展会</th><th>管理员账号</th><th>业务员账号</th><th>账号权限</th><th>操作</th></tr></thead>
             <tbody>
               ${events.map((event, index) => `
                 <tr>
@@ -2272,8 +2374,13 @@ const App = (() => {
                       ${eventRoleActionButtons(index, event)}
                     ` : `<span class="hint">仅超级管理员可调整</span>`}
                   </td>
+                  <td>
+                    ${eventOrderCount(event.id) === 0
+                      ? `<button class="tiny danger" onclick="App.deleteEvent(${index})">删除</button>`
+                      : `<span class="hint">${eventOrderCount(event.id)} 个订单</span>`}
+                  </td>
                 </tr>
-              `).join("") || `<tr><td colspan="9" class="empty">暂无展会</td></tr>`}
+              `).join("") || `<tr><td colspan="10" class="empty">暂无展会</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2365,6 +2472,18 @@ const App = (() => {
     const order = activeOrderForCompany(lead.companyId);
     if (order) return `<button class="tiny secondary" disabled title="该客户已有有效订单，请先走退订/变更流程">已有订单</button>`;
     return `<button class="tiny secondary" onclick="App.releaseCustomerLead(${lead.id})">下保</button>`;
+  }
+
+  function customerCreateOrderAction(lead, company) {
+    const order = activeOrderForCompany(lead.companyId);
+    if (order) return `<span class="status reserved">已创建订单</span>`;
+    return `<button class="tiny" onclick="App.customerAttend(${Number(company.id)}, ${Number(lead.id)})">创建订单</button>`;
+  }
+
+  function newCustomerActions(lead, company) {
+    const order = activeOrderForCompany(lead.companyId);
+    if (order) return `<span class="status reserved">已创建订单</span>`;
+    return `<div class="inline-actions">${customerCreateOrderAction(lead, company)}${customerReleaseAction(lead)}</div>`;
   }
 
   function leadDepositMet(lead) {
@@ -2562,7 +2681,7 @@ const App = (() => {
 
   function viewNewCustomers() {
     const rows = leadRows("new", "protected").filter((lead) => leadMatchesAdvancedFilter(lead, state.newCustomerFilter));
-    const action = (lead) => customerReleaseAction(lead);
+    const action = (lead, company) => newCustomerActions(lead, company);
     return `
       <section class="section">
         <div class="section-title-row">
@@ -2641,11 +2760,12 @@ const App = (() => {
         ${customerAdvancedFilterBar(state.oldCustomerFilter, "oldCustomerFilter", rows.length)}
         <div class="table-wrap">
           <table class="customer-table">
-            <thead><tr><th>企业名称</th><th>企业简称</th><th>客户信息</th><th>保护人</th><th>保护倒计时</th><th>历史成交</th></tr></thead>
+            <thead><tr><th>企业名称</th><th>企业简称</th><th>客户信息</th><th>保护人</th><th>保护倒计时</th><th>历史成交</th><th>操作</th></tr></thead>
             <tbody>
               ${rows.map((lead) => customerLeadRow(lead, {
-                extra: (item) => `${h(item.sourceEventName || "-")}<div class="hint">${money(item.sourceAmount || 0)}</div>`
-              })).join("") || `<tr><td colspan="6" class="empty">暂无老客户数据</td></tr>`}
+                extra: (item) => `${h(item.sourceEventName || "-")}<div class="hint">${money(item.sourceAmount || 0)}</div>`,
+                action: (item, company) => customerCreateOrderAction(item, company)
+              })).join("") || `<tr><td colspan="7" class="empty">暂无老客户数据</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2729,10 +2849,18 @@ const App = (() => {
     const role = state.data.me.role;
     const isAdmin = isAdminLikeRole(role);
     const selectedBooth = state.data.booths.find((item) => item.id === state.selectedBoothId) || null;
+    const selectedObstacle = (state.data.obstacles || []).find((item) => item.id === state.selectedObstacleId) || null;
+    const selectedActivityArea = (state.data.activityAreas || []).find((item) => item.id === state.selectedActivityAreaId) || null;
     const selectedIds = [...state.selectedBoothIds];
     const selectedBooths = selectedIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
+    const adminEditorTitle = selectedObstacle ? "障碍物属性" : selectedActivityArea ? "活动区属性" : "展位编辑";
+    const adminEditor = selectedObstacle
+      ? adminObstaclePanel()
+      : selectedActivityArea
+        ? adminActivityAreaPanel()
+        : adminBoothEditor(selectedBooth, selectedIds);
     return `
-      <section class="section">
+      <section class="section map-toolbar-section">
         <div class="toolbar">
           ${isAdmin ? adminMapToolbar() : salesMapToolbar(selectedBooths)}
           ${mapZoomToolbar()}
@@ -2745,15 +2873,9 @@ const App = (() => {
         </section>
         <aside class="side-panel">
           <section class="section">
-            <h2>${isAdmin ? "展位编辑" : "已选展位"}</h2>
-            ${isAdmin ? adminBoothEditor(selectedBooth, selectedIds) : selectedBoothSummary(selectedBooths)}
+            <h2>${isAdmin ? adminEditorTitle : "已选展位"}</h2>
+            ${isAdmin ? adminEditor : selectedBoothSummary(selectedBooths)}
           </section>
-          ${isAdmin ? `
-            <section class="section">
-              <h2>障碍物</h2>
-              ${adminObstaclePanel()}
-            </section>
-          ` : ""}
           <section class="section">
             <h2>图例</h2>
             <div class="legend">
@@ -2763,8 +2885,9 @@ const App = (() => {
               <span><i style="background: var(--disabled)"></i>停用</span>
               <span><i style="background: rgba(194, 65, 65, 0.74)"></i>展位内障碍物</span>
               <span><i style="background: rgba(71, 85, 105, 0.66)"></i>展位外障碍物</span>
+              <span><i style="background: rgba(14, 165, 233, 0.32)"></i>活动区</span>
             </div>
-            <p class="hint">管理员开启绘制模式后可拖拽绘制展位；切换障碍物模式后拖拽绘制障碍物。展位内障碍物会扣减计价面积和展位价格。</p>
+            <p class="hint">管理员开启绘制模式后可拖拽绘制展位；切换障碍物或活动区模式后拖拽绘制对应区域。展位内障碍物会扣减计价面积和展位价格。</p>
           </section>
         </aside>
       </div>
@@ -2862,7 +2985,7 @@ const App = (() => {
         <g data-booth-id="${booth.id}" class="sales-booth-group">
           <title>${h(salesBoothTooltip(booth))}</title>
           <rect class="sales-booth-rect ${available ? "available" : "unavailable"} ${focused ? "focused" : ""}" fill="${h(fill)}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
+          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(boothMapLabel(booth))}</text>` : ""}
         </g>
       `;
     }).join("");
@@ -2871,9 +2994,28 @@ const App = (() => {
         ${bg}
         <text x="28" y="34" fill="#536176" font-size="18">销售展位图 · ${booths.length} 个展位</text>
         ${items}
+        ${activityAreaSvgElements(false)}
         ${obstacleSvgElements(false)}
       </svg>
     `;
+  }
+
+  function activityAreaSvgElements(interactive = true) {
+    return (state.data.activityAreas || []).map((area) => {
+      const selected = state.selectedActivityAreaId === area.id;
+      const textVisible = area.width >= 36 && area.height >= 20;
+      const title = [
+        `活动区：${area.name || "活动区"}`,
+        `尺寸：${Math.round(area.width)} x ${Math.round(area.height)} 像素`
+      ].join("\n");
+      return `
+        <g data-activity-area-id="${area.id}" class="activity-area-group ${interactive ? "" : "readonly"}" ${interactive ? `onclick="App.activityAreaClick(event, ${area.id})"` : ""}>
+          <title>${h(title)}</title>
+          <rect class="activity-area-rect ${selected ? "selected" : ""}" x="${area.x}" y="${area.y}" width="${area.width}" height="${area.height}" rx="2"></rect>
+          ${textVisible ? `<text class="activity-area-text" x="${Number(area.x) + Number(area.width) / 2}" y="${Number(area.y) + Number(area.height) / 2}">${h(area.name || "活动区")}</text>` : ""}
+        </g>
+      `;
+    }).join("");
   }
 
   function obstacleSvgElements(interactive = true) {
@@ -2941,6 +3083,18 @@ const App = (() => {
     }) || null;
   }
 
+  function orderDepositMet(order) {
+    return Number(order?.depositRequired || 0) > 0
+      && Number(order?.paidApprovedAmount || 0) >= Number(order.depositRequired || 0);
+  }
+
+  function boothMapLabel(booth) {
+    const order = activeOrderForBooth(booth);
+    if (!orderDepositMet(order)) return booth.boothNo;
+    const company = getCompany(order.companyId);
+    return company.shortName || company.name || booth.boothNo;
+  }
+
   function adminMapToolbar() {
     return `
       <label>底图上传<input id="bg-file" type="file" accept="image/*,application/pdf"></label>
@@ -2949,6 +3103,7 @@ const App = (() => {
       <label>比例尺 像素/米<input id="map-scale" type="number" value="${mapScale()}" min="1"></label>
       <button class="secondary" onclick="App.saveMapScale()">保存比例尺</button>
       <button class="${state.drawMode ? "success" : "secondary"}" onclick="App.toggleDraw()">${state.drawMode ? "绘制模式中" : "开启绘制"}</button>
+      <button class="${state.activityAreaMode ? "success" : "secondary"}" onclick="App.toggleActivityAreaMode()">${state.activityAreaMode ? "活动区绘制中" : "绘制活动区"}</button>
       <button class="secondary" ${state.mapUndoStack.length ? "" : "disabled"} onclick="App.undoMapEdit()">撤销</button>
       <button class="secondary" ${state.mapRedoStack.length ? "" : "disabled"} onclick="App.redoMapEdit()">重做</button>
       <button class="secondary" ${state.mapUndoStack.length ? "" : "disabled"} onclick="App.undoMapEdit()">误删恢复</button>
@@ -2972,9 +3127,8 @@ const App = (() => {
   }
 
   function salesMapToolbar(selectedBooths) {
-    const amount = selectedBooths.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
     return `
-      <div class="notice">已选 ${selectedBooths.length} 个展位，预计订单金额 ${money(amount)}</div>
+      <div class="notice">${boothSelectionAmountText(selectedBooths)}</div>
       <button ${selectedBooths.length ? "" : "disabled"} onclick="App.useSelectedBooths()">用已选展位创建订单</button>
       <button class="secondary" onclick="App.clearBoothSelection()">清空选择</button>
     `;
@@ -3006,7 +3160,7 @@ const App = (() => {
         <label>默认展馆<select id="draw-preset-hall" onchange="App.updateDrawPreset()">${hallOptions}</select></label>
         <label>默认展区<select id="draw-preset-zone" onchange="App.updateDrawPreset()">${zoneOptions}</select></label>
         <label>展位号前缀<input id="draw-booth-prefix" value="${h(state.drawBoothNoPrefix)}" oninput="App.updateDrawPreset()"></label>
-        <label>展位号字符数<input id="draw-booth-chars" type="number" min="1" value="${h(state.drawBoothNoChars)}" oninput="App.updateDrawPreset()"></label>
+        <label>展位号总位数<input id="draw-booth-chars" type="number" min="1" max="12" value="${h(state.drawBoothNoChars)}" oninput="App.updateDrawPreset()"></label>
         <label>起始展位号<input id="draw-booth-start" type="number" min="0" value="${h(state.drawBoothNoStart)}" oninput="App.updateDrawPreset()"></label>
         <label>是否跳号<select id="draw-booth-skip-enabled" onchange="App.updateDrawPreset()">
           <option value="no" ${state.drawBoothNoSkipEnabled !== "yes" ? "selected" : ""}>否</option>
@@ -3034,7 +3188,7 @@ const App = (() => {
       return `
         <g data-booth-id="${booth.id}" onclick="App.boothClick(event, ${booth.id})">
           <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${base ? "base" : ""} ${booth.locked ? "locked" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
+          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(boothMapLabel(booth))}</text>` : ""}
           ${booth.locked ? `<text class="booth-lock-text" x="${booth.x + Number(booth.width || 0) - 8}" y="${booth.y + 12}">锁</text>` : ""}
         </g>
       `;
@@ -3047,6 +3201,7 @@ const App = (() => {
         ${bg}
         <text x="28" y="34" fill="#536176" font-size="18">展位图 · ${state.data.booths.length} 个展位</text>
         ${booths}
+        ${activityAreaSvgElements(true)}
         ${obstacleSvgElements(true)}
       </svg>
     `;
@@ -3095,10 +3250,24 @@ const App = (() => {
       </div>
       <div class="split-actions">
         <button class="secondary" onclick="App.batchUpdateBooths()">批量更新</button>
-        <button class="secondary" onclick="App.alignSelectedBooths('x')">按 X 轴对齐</button>
-        <button class="secondary" onclick="App.alignSelectedBooths('y')">按 Y 轴对齐</button>
-        <button class="secondary" onclick="App.attachSelectedBooths('x')">沿 X 轴对齐并贴合</button>
-        <button class="secondary" onclick="App.attachSelectedBooths('y')">沿 Y 轴对齐并贴合</button>
+        <span class="axis-align-control">
+          <label>沿 X 轴<select id="booth-align-x-mode">
+            <option value="align:start">上对齐</option>
+            <option value="align:end">下对齐</option>
+            <option value="attach:start">上对齐并贴合</option>
+            <option value="attach:end">下对齐并贴合</option>
+          </select></label>
+          <button class="secondary" onclick="App.applyBoothAlignment('x')">执行</button>
+        </span>
+        <span class="axis-align-control">
+          <label>沿 Y 轴<select id="booth-align-y-mode">
+            <option value="align:start">左对齐</option>
+            <option value="align:end">右对齐</option>
+            <option value="attach:start">左对齐并贴合</option>
+            <option value="attach:end">右对齐并贴合</option>
+          </select></label>
+          <button class="secondary" onclick="App.applyBoothAlignment('y')">执行</button>
+        </span>
         <button class="secondary" onclick="App.copySelectedBooths()">批量复制</button>
         <button class="danger" onclick="App.deleteSelectedBooths()">删除选中展位</button>
         <button class="secondary" onclick="App.clearBoothSelection()">清空批量</button>
@@ -3155,6 +3324,42 @@ const App = (() => {
     `;
   }
 
+  function adminActivityAreaPanel() {
+    const areas = state.data.activityAreas || [];
+    const area = areas.find((item) => item.id === state.selectedActivityAreaId);
+    if (!area) {
+      return `
+        <div class="compact-list">
+          <div class="compact-item">
+            <strong>已绘制 ${areas.length} 个活动区</strong>
+            <div class="hint">点击“绘制活动区”后，在展位图上像绘制展位一样拖拽即可创建；活动区不会加入展位选择，也不会影响展位计价。</div>
+          </div>
+        </div>
+      `;
+    }
+    const widthM = pxToMeter(area.width, 3);
+    const depthM = pxToMeter(area.height, 3);
+    return `
+      <div class="compact-list">
+        <div class="compact-item">
+          <strong>${h(area.name || "活动区")}</strong>
+          <div class="hint">${fixedDecimal(widthM, 3)}m x ${fixedDecimal(depthM, 3)}m · ${Math.round(area.width)} x ${Math.round(area.height)} 像素</div>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:12px">
+        <label>活动区名称<input id="activity-area-name" value="${h(area.name || "活动区")}"></label>
+        <label>活动区长m<input id="activity-area-width-m" type="number" step="0.001" value="${fixedDecimal(widthM, 3)}" oninput="App.previewActivityAreaSize()"></label>
+        <label>活动区宽m<input id="activity-area-depth-m" type="number" step="0.001" value="${fixedDecimal(depthM, 3)}" oninput="App.previewActivityAreaSize()"></label>
+        <label>图上像素<input id="activity-area-pixel-size" value="${Math.round(area.width)} x ${Math.round(area.height)}" disabled></label>
+      </div>
+      <div class="split-actions" style="margin-top:12px">
+        <button onclick="App.saveActivityArea()">保存活动区</button>
+        <button class="danger" onclick="App.deleteActivityArea(${area.id})">删除活动区</button>
+        <button class="secondary" onclick="App.clearActivityAreaSelection()">取消选择</button>
+      </div>
+    `;
+  }
+
   function selectedBoothSummary(booths) {
     if (!booths.length) return `<div class="empty">点击绿色空闲展位加入选择。</div>`;
     return `
@@ -3203,6 +3408,10 @@ const App = (() => {
           <label>释放前提醒天数<input id="rule-notice" type="number" value="${rules.noticeDaysBeforeRelease}"></label>
           <label>新客户保护天数<input id="rule-new-customer-days" type="number" value="${rules.newCustomerProtectDays ?? 30}"></label>
           <label>老客户保护天数<input id="rule-old-customer-days" type="number" value="${rules.oldCustomerProtectDays ?? 30}"></label>
+          <label>管理员联系方式脱敏<select id="rule-admin-contact-mask-mode" onchange="App.salesFlowRuleChanged()">
+            <option value="off" ${(rules.adminContactMaskMode || "off") !== "department" ? "selected" : ""}>关闭：管理员可查看全部联系方式</option>
+            <option value="department" ${rules.adminContactMaskMode === "department" ? "selected" : ""}>开启：管理员仅查看本部门联系方式</option>
+          </select></label>
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>销售流程<select id="rule-sales-flow" onchange="App.salesFlowRuleChanged()">
@@ -3409,7 +3618,6 @@ const App = (() => {
     const keyword = state.boothPickerSearch.trim().toLowerCase();
     const booths = state.data.booths.filter((booth) => !keyword || String(booth.boothNo).toLowerCase().includes(keyword));
     const selectedBooths = state.pendingBoothIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
-    const selectedAmount = selectedBooths.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
     return `
       <div class="modal-backdrop">
         <section class="modal large">
@@ -3423,7 +3631,7 @@ const App = (() => {
               <button class="secondary" onclick="App.searchBoothPicker()">搜索</button>
             </div>
             ${mapZoomToolbar()}
-            <div class="notice">已选 ${selectedBooths.length} 个，金额 ${money(selectedAmount)}</div>
+            <div class="notice">${boothSelectionAmountText(selectedBooths)}</div>
           </div>
           <div id="booth-picker-map" class="modal-map">
             ${pickerMapSvg(booths)}
@@ -3682,7 +3890,6 @@ const App = (() => {
     const booths = state.data.booths;
     const availableCount = booths.filter((booth) => booth.status === "available").length;
     const selectedBooths = state.changePickerBoothIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
-    const selectedAmount = selectedBooths.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
     return `
       <div class="modal-backdrop">
         <section class="modal large">
@@ -3696,7 +3903,7 @@ const App = (() => {
               <button class="secondary" onclick="App.searchChangeBooth()">搜索</button>
             </div>
             ${mapZoomToolbar()}
-            <div class="notice">原展位：${h(orderBoothNos(order) || "-")}；新展位：${selectedBooths.map((booth) => h(booth.boothNo)).join(" / ") || "未选择"}；空闲 ${availableCount} 个；金额 ${money(selectedAmount)}</div>
+            <div class="notice">原展位：${h(orderBoothNos(order) || "-")}；新展位：${selectedBooths.map((booth) => h(booth.boothNo)).join(" / ") || "未选择"}；空闲 ${availableCount} 个；${boothSelectionAmountText(selectedBooths, order.discountRuleId)}</div>
           </div>
           <div id="change-booth-map" class="modal-map">
             ${changePickerMapSvg(booths)}
@@ -4128,10 +4335,26 @@ const App = (() => {
     `;
   }
 
+  function selfPasswordSection() {
+    return `
+      <section class="section">
+        <h2>修改我的密码</h2>
+        <div class="grid three">
+          <label>${requiredLabel("原密码")}<input id="self-current-password" type="password" autocomplete="current-password"></label>
+          <label>${requiredLabel("新密码")}<input id="self-new-password" type="password" autocomplete="new-password"></label>
+          <label>${requiredLabel("确认新密码")}<input id="self-confirm-password" type="password" autocomplete="new-password"></label>
+        </div>
+        <div class="split-actions" style="margin-top:14px"><button onclick="App.changeMyPassword()">保存新密码</button></div>
+      </section>
+    `;
+  }
+
   function viewAccounts() {
     const users = state.data.users.slice().sort((a, b) => a.id - b.id);
     const departments = departmentList();
+    if (!isSuperAdminRole(state.data.me.role)) return selfPasswordSection();
     return `
+      ${selfPasswordSection()}
       <section class="section">
         <div class="section-title-row">
           <h2>部门管理</h2>
@@ -4178,7 +4401,7 @@ const App = (() => {
         <h2>账号列表</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>姓名</th><th>账号</th><th>角色</th><th>部门</th><th>状态</th><th>最后登录</th></tr></thead>
+            <thead><tr><th>ID</th><th>姓名</th><th>账号</th><th>角色</th><th>部门</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
             <tbody>
               ${users.map((user) => `
                 <tr>
@@ -4189,6 +4412,11 @@ const App = (() => {
                   <td>${["manager", "sales"].includes(user.role) ? `<select onchange="App.assignUserDepartment(${user.id}, this.value)">${departmentOptions(user.departmentId)}</select>` : "-"}</td>
                   <td>${user.active ? "启用" : "停用"}</td>
                   <td>${date(user.lastLoginAt)}</td>
+                  <td>
+                    ${userOrderCount(user.id) === 0 && Number(user.id) !== Number(state.data.me.id)
+                      ? `<button class="tiny danger" onclick="App.deleteUser(${user.id})">删除</button>`
+                      : `<span class="hint">${Number(user.id) === Number(state.data.me.id) ? "当前账号" : `${userOrderCount(user.id)} 个订单`}</span>`}
+                  </td>
                 </tr>
               `).join("")}
             </tbody>
@@ -4356,6 +4584,27 @@ const App = (() => {
 
   function boothCenterY(booth) {
     return Number(booth.y || 0) + Number(booth.height || 0) / 2;
+  }
+
+  function boothLeft(booth) {
+    return Number(booth.x || 0);
+  }
+
+  function boothTop(booth) {
+    return Number(booth.y || 0);
+  }
+
+  function boothRight(booth) {
+    return boothLeft(booth) + Number(booth.width || 0);
+  }
+
+  function boothBottom(booth) {
+    return boothTop(booth) + Number(booth.height || 0);
+  }
+
+  function boothAlignmentLabel(axis, edge) {
+    if (axis === "x") return edge === "end" ? "下对齐" : "上对齐";
+    return edge === "end" ? "右对齐" : "左对齐";
   }
 
   function selectedAvailableBooths() {
@@ -4666,6 +4915,27 @@ const App = (() => {
         ctx.fillText(String(booth.boothNo || ""), x + boothWidth / 2, y + boothHeight / 2);
       }
     });
+    (state.data.activityAreas || []).forEach((area) => {
+      const x = Number(area.x || 0);
+      const y = Number(area.y || 0);
+      const areaWidth = Number(area.width || 0);
+      const areaHeight = Number(area.height || 0);
+      drawRoundedRect(ctx, x, y, areaWidth, areaHeight, 2);
+      ctx.fillStyle = "rgba(14, 165, 233, 0.22)";
+      ctx.fill();
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = "#0284c7";
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (areaWidth >= 36 && areaHeight >= 20) {
+        ctx.fillStyle = "#075985";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "11px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+        ctx.fillText(String(area.name || "活动区"), x + areaWidth / 2, y + areaHeight / 2);
+      }
+    });
     (state.data.obstacles || []).forEach((obstacle) => {
       const x = Number(obstacle.x || 0);
       const y = Number(obstacle.y || 0);
@@ -4909,6 +5179,25 @@ const App = (() => {
         method: "POST",
         body: { name }
       }), "展会类别已新增");
+    },
+    async deleteEventCategory(category) {
+      if (!window.confirm(`确认删除展会类别“${category}”？`)) return;
+      await run(() => api(`/api/event-categories/${encodeURIComponent(category)}`, { method: "DELETE" }), "展会类别已删除");
+    },
+    async deleteEvent(index) {
+      const event = (state.data.settings.events || [])[index];
+      if (!event) return;
+      const orders = eventOrderCount(event.id);
+      if (orders > 0) {
+        state.error = `展会已有 ${orders} 个订单，不能删除`;
+        render();
+        return;
+      }
+      if (!window.confirm(`确认删除展会“${event.name || event.id}”？`)) return;
+      await run(() => api("/api/events/delete", {
+        method: "POST",
+        body: { eventIds: [event.id] }
+      }), "展会已删除");
     },
     openEventCreateModal() {
       state.eventCreateModalOpen = true;
@@ -5215,7 +5504,8 @@ const App = (() => {
       this.prefillOrderFromCompany(company);
       state.companyDetailId = null;
       state.customerAttendLeadId = leadId || null;
-      state.pendingBoothIds = [];
+      state.pendingBoothIds = [...new Set(state.pendingBoothIds)]
+        .filter((id) => state.data.booths.some((booth) => Number(booth.id) === Number(id) && booth.status === "available"));
       state.boothPickerOpen = true;
       state.boothPickerSearch = "";
       state.boothPickerFocusId = null;
@@ -5376,6 +5666,15 @@ const App = (() => {
       state.drawBoothNoPrefix = byId("draw-booth-prefix")?.value ?? state.drawBoothNoPrefix;
       state.drawBoothNoChars = byId("draw-booth-chars")?.value ?? state.drawBoothNoChars;
       state.drawBoothNoStart = byId("draw-booth-start")?.value ?? state.drawBoothNoStart;
+      const normalizedNo = normalizedDrawBoothNoConfig();
+      if (normalizedNo.correctedFromNumber || String(state.drawBoothNoChars) !== String(normalizedNo.totalChars)) {
+        state.drawBoothNoChars = String(normalizedNo.totalChars);
+        state.drawBoothNoStart = String(normalizedNo.startNo);
+        const charsInput = byId("draw-booth-chars");
+        const startInput = byId("draw-booth-start");
+        if (charsInput) charsInput.value = state.drawBoothNoChars;
+        if (startInput) startInput.value = state.drawBoothNoStart;
+      }
       const previousSkipEnabled = state.drawBoothNoSkipEnabled;
       state.drawBoothNoSkipEnabled = byId("draw-booth-skip-enabled")?.value ?? state.drawBoothNoSkipEnabled;
       state.drawBoothNoStep = byId("draw-booth-step")?.value ?? state.drawBoothNoStep;
@@ -5437,12 +5736,24 @@ const App = (() => {
     toggleDraw() {
       state.drawMode = !state.drawMode;
       if (state.drawMode) state.obstacleMode = "";
+      if (state.drawMode) state.activityAreaMode = false;
+      state.selecting = null;
+      render();
+    },
+    toggleActivityAreaMode() {
+      state.activityAreaMode = !state.activityAreaMode;
+      if (state.activityAreaMode) {
+        state.drawMode = false;
+        state.obstacleMode = "";
+      }
+      state.drawing = null;
       state.selecting = null;
       render();
     },
     toggleObstacleMode(type) {
       state.obstacleMode = state.obstacleMode === type ? "" : type;
       if (state.obstacleMode) state.drawMode = false;
+      if (state.obstacleMode) state.activityAreaMode = false;
       state.drawing = null;
       state.selecting = null;
       render();
@@ -5473,12 +5784,19 @@ const App = (() => {
       }
       const widthM = pxToMeter(normalized.width, 3);
       const depthM = pxToMeter(normalized.height, 3);
+      const boothNo = nextBoothNo();
+      const boothNoError = boothNoValidationError(boothNo);
+      if (boothNoError) {
+        state.error = boothNoError;
+        render();
+        return null;
+      }
       const scroll = captureMapScroll();
       rememberMapState();
       const result = await run(() => api("/api/booths", {
         method: "POST",
         body: {
-          boothNo: nextBoothNo(),
+          boothNo,
           x: preciseCoord(normalized.x),
           y: preciseCoord(normalized.y),
           width: preciseCoord(normalized.width),
@@ -5490,13 +5808,49 @@ const App = (() => {
           zone: currentDrawPresetZone(),
           attr: "standard"
         }
-      }), success);
-      if (result?.booth) {
-        state.selectedBoothId = result.booth.id;
-        state.selectedBoothIds.clear();
-        state.selectedObstacleId = null;
+      }), success, {
+        refresh: false,
+        apply: (result) => {
+          if (!result?.booth) return;
+          state.data.booths.push(result.booth);
+          state.selectedBoothId = result.booth.id;
+          state.selectedBoothIds.clear();
+          state.selectedObstacleId = null;
+          state.selectedActivityAreaId = null;
+        }
+      });
+      restoreMapScroll(scroll);
+      return result;
+    },
+    async createActivityAreaFromRect(rect, success = "活动区已创建") {
+      const normalized = clampRectToMap(rect);
+      if (Number(normalized.width || 0) < 12 || Number(normalized.height || 0) < 12) {
+        state.error = "活动区尺寸太小";
         render();
+        return null;
       }
+      const scroll = captureMapScroll();
+      rememberMapState();
+      const result = await run(() => api("/api/activity-areas", {
+        method: "POST",
+        body: {
+          name: `活动区${(state.data.activityAreas || []).length + 1}`,
+          x: preciseCoord(normalized.x),
+          y: preciseCoord(normalized.y),
+          width: preciseCoord(normalized.width),
+          height: preciseCoord(normalized.height)
+        }
+      }), success, {
+        refresh: false,
+        apply: (result) => {
+          if (!result?.activityArea) return;
+          state.data.activityAreas.push(result.activityArea);
+          state.selectedActivityAreaId = result.activityArea.id;
+          state.selectedBoothId = null;
+          state.selectedBoothIds.clear();
+          state.selectedObstacleId = null;
+        }
+      });
       restoreMapScroll(scroll);
       return result;
     },
@@ -5504,12 +5858,30 @@ const App = (() => {
       if (!isAdminLikeRole(state.data.me.role)) return;
       const group = event.target.closest("g[data-booth-id]");
       const obstacleGroup = event.target.closest("g[data-obstacle-id]");
+      const activityAreaGroup = event.target.closest("g[data-activity-area-id]");
       if (state.obstacleMode) {
         event.preventDefault();
         state.obstacleDrawing = {
           start: svgPoint(event),
           type: state.obstacleMode
         };
+        return;
+      }
+      if (state.activityAreaMode) {
+        event.preventDefault();
+        state.activityAreaDrawing = svgPoint(event);
+        return;
+      }
+      if (activityAreaGroup) {
+        if (state.drawMode) return;
+        const areaId = Number(activityAreaGroup.dataset.activityAreaId);
+        if (!(state.data.activityAreas || []).some((item) => item.id === areaId)) return;
+        event.preventDefault();
+        state.selectedActivityAreaId = areaId;
+        state.selectedBoothId = null;
+        state.selectedBoothIds.clear();
+        state.selectedObstacleId = null;
+        render();
         return;
       }
       if (obstacleGroup) {
@@ -5520,6 +5892,7 @@ const App = (() => {
         const start = svgPoint(event);
         event.preventDefault();
         state.selectedObstacleId = obstacleId;
+        state.selectedActivityAreaId = null;
         if (obstacle.boothId) state.selectedBoothId = Number(obstacle.boothId);
         state.mapObstacleDragSnapshot = cloneMapSnapshot();
         state.obstacleDragging = {
@@ -5538,6 +5911,7 @@ const App = (() => {
         if (!booth || booth.status === "sold" || booth.locked) return;
         const start = svgPoint(event);
         state.selectedBoothId = boothId;
+        state.selectedActivityAreaId = null;
         state.mapDragSnapshot = cloneMapSnapshot();
         state.dragging = {
           boothId,
@@ -5570,6 +5944,16 @@ const App = (() => {
           "stroke-width": "2",
           "stroke-dasharray": "5 4"
         }, state.obstacleShape);
+        return;
+      }
+      if (state.activityAreaDrawing) {
+        const rect = rectFromPoints(state.activityAreaDrawing, svgPoint(event));
+        updatePreviewRect("activity-area-preview", rect, {
+          fill: "rgba(14, 165, 233, 0.18)",
+          stroke: "#0284c7",
+          "stroke-width": "2",
+          "stroke-dasharray": "6 4"
+        });
         return;
       }
       if (state.obstacleDragging) {
@@ -5673,6 +6057,16 @@ const App = (() => {
         restoreMapScroll(scroll);
         return;
       }
+      if (state.activityAreaDrawing) {
+        const start = state.activityAreaDrawing;
+        state.activityAreaDrawing = null;
+        const preview = byId("activity-area-preview");
+        if (preview) preview.remove();
+        const rect = rectFromPoints(start, svgPoint(event));
+        if (rect.width < 12 || rect.height < 12) return;
+        await this.createActivityAreaFromRect(rect, "活动区已创建");
+        return;
+      }
       if (state.obstacleDragging) {
         const drag = state.obstacleDragging;
         state.obstacleDragging = null;
@@ -5724,6 +6118,7 @@ const App = (() => {
         if (!selecting.additive || !state.selectedBoothIds.has(state.selectedBoothId)) {
           state.selectedBoothId = hits[0]?.id || null;
         }
+        state.selectedActivityAreaId = null;
         const baseBooth = state.data.booths.find((item) => item.id === state.selectedBoothId);
         state.message = hits.length ? `已框选 ${hits.length} 个空闲展位，基点为 ${baseBooth?.boothNo || "-"}，可在右侧批量更新或对齐` : "框选范围内没有空闲展位";
         render();
@@ -5787,6 +6182,7 @@ const App = (() => {
       if (isAdminLikeRole(state.data.me.role)) {
         state.selectedBoothId = boothId;
         state.selectedObstacleId = null;
+        state.selectedActivityAreaId = null;
       } else if (booth.status === "available") {
         if (state.selectedBoothIds.has(boothId)) state.selectedBoothIds.delete(boothId);
         else state.selectedBoothIds.add(boothId);
@@ -5803,12 +6199,62 @@ const App = (() => {
       const obstacle = (state.data.obstacles || []).find((item) => item.id === obstacleId);
       if (!obstacle) return;
       state.selectedObstacleId = obstacleId;
+      state.selectedActivityAreaId = null;
       if (obstacle.boothId) state.selectedBoothId = obstacle.boothId;
+      render();
+    },
+    activityAreaClick(event, areaId) {
+      event.stopPropagation();
+      if (!isAdminLikeRole(state.data.me.role)) return;
+      const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
+      if (!area) return;
+      state.selectedActivityAreaId = areaId;
+      state.selectedBoothId = null;
+      state.selectedBoothIds.clear();
+      state.selectedObstacleId = null;
       render();
     },
     clearObstacleSelection() {
       state.selectedObstacleId = null;
       render();
+    },
+    clearActivityAreaSelection() {
+      state.selectedActivityAreaId = null;
+      state.activityAreaSizePreviewHistoryId = null;
+      render();
+    },
+    previewActivityAreaSize() {
+      const area = (state.data.activityAreas || []).find((item) => item.id === state.selectedActivityAreaId);
+      if (!area) return;
+      if (state.activityAreaSizePreviewHistoryId !== area.id) {
+        rememberMapState();
+        state.activityAreaSizePreviewHistoryId = area.id;
+      }
+      const widthM = Number(byId("activity-area-width-m")?.value || 0);
+      const depthM = Number(byId("activity-area-depth-m")?.value || 0);
+      if (!Number.isFinite(widthM) || !Number.isFinite(depthM)) return;
+      const map = state.data.map || {};
+      const width = Math.min(Math.max(1, meterToPx(widthM)), Math.max(1, Number(map.width || meterToPx(widthM))));
+      const height = Math.min(Math.max(1, meterToPx(depthM)), Math.max(1, Number(map.height || meterToPx(depthM))));
+      const rect = clampRectToMap({ x: area.x, y: area.y, width, height });
+      const shapeElement = document.querySelector(`g[data-activity-area-id="${area.id}"] rect`);
+      const text = document.querySelector(`g[data-activity-area-id="${area.id}"] text`);
+      const pixelInput = byId("activity-area-pixel-size");
+      if (pixelInput) pixelInput.value = `${Math.round(width)} x ${Math.round(height)}`;
+      if (shapeElement) {
+        shapeElement.setAttribute("x", rect.x);
+        shapeElement.setAttribute("y", rect.y);
+        shapeElement.setAttribute("width", width);
+        shapeElement.setAttribute("height", height);
+      }
+      if (text) {
+        text.setAttribute("x", Number(rect.x) + width / 2);
+        text.setAttribute("y", Number(rect.y) + height / 2);
+      }
+      area.x = rect.x;
+      area.y = rect.y;
+      area.width = width;
+      area.height = height;
     },
     previewObstacleSize() {
       const obstacle = (state.data.obstacles || []).find((item) => item.id === state.selectedObstacleId);
@@ -5896,6 +6342,56 @@ const App = (() => {
         restoreMapScroll(scroll);
       }
     },
+    async saveActivityArea() {
+      const area = (state.data.activityAreas || []).find((item) => item.id === state.selectedActivityAreaId);
+      if (!area) return;
+      const name = String(byId("activity-area-name")?.value || "").trim();
+      if (!name) {
+        state.error = "请填写活动区名称";
+        render();
+        return;
+      }
+      const widthM = Number(byId("activity-area-width-m")?.value || 0);
+      const depthM = Number(byId("activity-area-depth-m")?.value || 0);
+      if (!Number.isFinite(widthM) || !Number.isFinite(depthM) || widthM <= 0 || depthM <= 0) {
+        state.error = "请填写大于 0 的活动区长和宽";
+        render();
+        return;
+      }
+      const map = state.data.map || {};
+      const width = Math.min(Math.max(1, meterToPx(widthM)), Math.max(1, Number(map.width || meterToPx(widthM))));
+      const height = Math.min(Math.max(1, meterToPx(depthM)), Math.max(1, Number(map.height || meterToPx(depthM))));
+      const rect = clampRectToMap({ x: area.x, y: area.y, width, height });
+      const scroll = captureMapScroll();
+      if (state.activityAreaSizePreviewHistoryId !== area.id) rememberMapState();
+      const result = await run(() => api(`/api/activity-areas/${area.id}`, {
+        method: "PUT",
+        body: {
+          name,
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(width),
+          height: Math.round(height)
+        }
+      }), "活动区已保存");
+      if (result) {
+        state.activityAreaSizePreviewHistoryId = null;
+        restoreMapScroll(scroll);
+      }
+    },
+    async deleteActivityArea(areaId) {
+      const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
+      if (!area) return;
+      if (!window.confirm(`确认删除活动区“${area.name || "活动区"}”？`)) return;
+      const scroll = captureMapScroll();
+      rememberMapState();
+      const result = await run(() => api(`/api/activity-areas/${areaId}`, { method: "DELETE" }), "活动区已删除");
+      if (result) {
+        state.selectedActivityAreaId = null;
+        state.activityAreaSizePreviewHistoryId = null;
+        restoreMapScroll(scroll);
+      }
+    },
     toggleSelected(boothId) {
       if (state.selectedBoothIds.has(boothId)) {
         state.selectedBoothIds.delete(boothId);
@@ -5911,12 +6407,17 @@ const App = (() => {
     clearBoothSelection() {
       state.selectedBoothIds.clear();
       state.pendingBoothIds = [];
+      state.selectedBoothId = null;
+      state.selectedActivityAreaId = null;
       render();
     },
     useSelectedBooths() {
-      state.pendingBoothIds = [];
+      const boothIds = selectedAvailableBooths().map((booth) => booth.id);
+      state.pendingBoothIds = [...new Set(boothIds)];
       state.view = "new-customers";
-      state.message = "请先在新客户列表选择客户，再点击企业名称进入详情后选择“参展”创建订单";
+      state.message = state.pendingBoothIds.length
+        ? `已带入 ${state.pendingBoothIds.length} 个展位，请在客户列表选择企业后点击“参展”创建订单`
+        : "请先选择空闲展位";
       render();
     },
     openBoothPicker() {
@@ -6050,7 +6551,9 @@ const App = (() => {
       event.stopPropagation();
       const booth = state.data.booths.find((item) => item.id === boothId);
       if (!booth || booth.status !== "available") return;
-      state.changePickerBoothIds = state.changePickerBoothIds.includes(boothId) ? [] : [boothId];
+      state.changePickerBoothIds = state.changePickerBoothIds.includes(boothId)
+        ? state.changePickerBoothIds.filter((id) => id !== boothId)
+        : [...state.changePickerBoothIds, boothId];
       state.changePickerFocusId = boothId;
       render();
     },
@@ -6119,13 +6622,15 @@ const App = (() => {
         const file = input?.files?.[0];
         const dimensions = await imageDimensionsFromFile(file);
         const attachment = await uploadFileFromInput("bg-file", "map-background");
+        const backgroundWidth = dimensions?.width || attachment?.width;
+        const backgroundHeight = dimensions?.height || attachment?.height;
         if (!attachment) throw new Error("请选择底图文件");
         return api("/api/map/background", {
           method: "POST",
           body: {
             attachmentId: attachment.id,
-            width: dimensions?.width,
-            height: dimensions?.height,
+            width: backgroundWidth,
+            height: backgroundHeight,
             scaleBooths: false
           }
         });
@@ -6153,11 +6658,19 @@ const App = (() => {
       }
       const widthM = Number(byId("booth-width-m").value || booth.widthM || 0);
       const depthM = Number(byId("booth-depth-m").value || booth.depthM || 0);
+      const boothNo = String(byId("booth-no").value || "").trim();
+      const boothNoError = boothNoValidationError(boothNo, booth.id);
+      if (boothNoError) {
+        window.alert(boothNoError);
+        state.error = boothNoError;
+        render();
+        return;
+      }
       if (state.boothSizePreviewHistoryId !== booth.id) rememberMapState();
       const result = await run(() => api(`/api/booths/${booth.id}`, {
         method: "PUT",
         body: {
-          boothNo: byId("booth-no").value.trim(),
+          boothNo,
           hall: byId("booth-hall").value,
           zone: byId("booth-zone").value,
           attr: byId("booth-attr").value,
@@ -6280,10 +6793,7 @@ const App = (() => {
       const offset = Math.max(1, Number(offsetInput || 12) || 12);
       const map = state.data.map || {};
       const existingNos = new Set((state.data.booths || []).map((booth) => String(booth.boothNo || "").trim()).filter(Boolean));
-      const prefix = String(state.drawBoothNoPrefix || "").trim();
-      const totalChars = Math.max(prefix.length + 1, Number(state.drawBoothNoChars || 0) || 4);
-      const numericWidth = Math.max(1, totalChars - prefix.length);
-      const startNo = Math.max(0, Number(state.drawBoothNoStart || 0) || 1);
+      const { prefix, numericWidth, startNo } = normalizedDrawBoothNoConfig();
       const step = state.drawBoothNoSkipEnabled === "yes" ? Math.max(1, Number(state.drawBoothNoStep || 0) || 1) : 1;
       const pattern = new RegExp(`^${escapeRegExp(prefix)}(\\d+)$`);
       const formatNo = (number) => `${prefix}${String(number).padStart(numericWidth, "0")}`;
@@ -6334,7 +6844,8 @@ const App = (() => {
         method: "POST",
         body: {
           booths: snapshot.booths.concat(clones),
-          obstacles: snapshot.obstacles
+          obstacles: snapshot.obstacles,
+          activityAreas: snapshot.activityAreas
         }
       }), `已复制 ${clones.length} 个展位`);
       if (result) {
@@ -6343,7 +6854,16 @@ const App = (() => {
         restoreMapScroll(scroll);
       }
     },
-    async alignSelectedBooths(axis) {
+    async applyBoothAlignment(axis) {
+      const mode = byId(axis === "x" ? "booth-align-x-mode" : "booth-align-y-mode")?.value || "align:start";
+      const [action, edge] = mode.split(":");
+      if (action === "attach") {
+        await this.attachSelectedBooths(axis, edge);
+      } else {
+        await this.alignSelectedBooths(axis, edge);
+      }
+    },
+    async alignSelectedBooths(axis, edge = "start") {
       const selected = selectedAvailableBooths();
       if (selected.length < 2) {
         state.error = "请至少框选 2 个空闲展位再对齐";
@@ -6354,16 +6874,23 @@ const App = (() => {
       state.selectedBoothId = base.id;
       const positions = selected.map((booth) => (
         axis === "x"
-          ? { id: booth.id, y: preciseCoord(boothCenterY(base) - Number(booth.height || 0) / 2) }
-          : { id: booth.id, x: preciseCoord(boothCenterX(base) - Number(booth.width || 0) / 2) }
+          ? {
+              id: booth.id,
+              y: preciseCoord(edge === "end" ? boothBottom(base) - Number(booth.height || 0) : boothTop(base))
+            }
+          : {
+              id: booth.id,
+              x: preciseCoord(edge === "end" ? boothRight(base) - Number(booth.width || 0) : boothLeft(base))
+            }
       ));
+      const label = boothAlignmentLabel(axis, edge);
       rememberMapState();
       await run(() => api("/api/booths/batch", {
         method: "POST",
         body: { ids: selected.map((booth) => booth.id), positions }
-      }), axis === "x" ? `已按基点 ${base.boothNo} 的中心 X 轴对齐` : `已按基点 ${base.boothNo} 的中心 Y 轴对齐`);
+      }), `已沿 ${axis.toUpperCase()} 轴按基点 ${base.boothNo} ${label}`);
     },
-    async attachSelectedBooths(axis) {
+    async attachSelectedBooths(axis, edge = "start") {
       const selected = selectedAvailableBooths();
       if (selected.length < 2) {
         state.error = "请至少框选 2 个空闲展位再贴合";
@@ -6375,25 +6902,25 @@ const App = (() => {
       const horizontal = axis === "x";
       const ordered = [...selected].sort((a, b) => (
         horizontal
-          ? (boothCenterX(a) - boothCenterX(b)) || (boothCenterY(a) - boothCenterY(b))
-          : (boothCenterY(a) - boothCenterY(b)) || (boothCenterX(a) - boothCenterX(b))
+          ? (boothLeft(a) - boothLeft(b)) || (boothTop(a) - boothTop(b))
+          : (boothTop(a) - boothTop(b)) || (boothLeft(a) - boothLeft(b))
       ));
       const baseIndex = Math.max(0, ordered.findIndex((booth) => booth.id === base.id));
       const map = state.data.map || {};
       const positions = new Map();
       if (horizontal) {
-        const centerY = boothCenterY(base);
+        const alignY = (booth) => edge === "end" ? boothBottom(base) - Number(booth.height || 0) : boothTop(base);
         let left = Number(base.x || 0);
         let right = Number(base.x || 0) + Number(base.width || 0);
-        positions.set(base.id, { id: base.id, x: Number(base.x || 0), y: centerY - Number(base.height || 0) / 2 });
+        positions.set(base.id, { id: base.id, x: Number(base.x || 0), y: alignY(base) });
         for (let index = baseIndex - 1; index >= 0; index -= 1) {
           const booth = ordered[index];
           left -= Number(booth.width || 0);
-          positions.set(booth.id, { id: booth.id, x: left, y: centerY - Number(booth.height || 0) / 2 });
+          positions.set(booth.id, { id: booth.id, x: left, y: alignY(booth) });
         }
         for (let index = baseIndex + 1; index < ordered.length; index += 1) {
           const booth = ordered[index];
-          positions.set(booth.id, { id: booth.id, x: right, y: centerY - Number(booth.height || 0) / 2 });
+          positions.set(booth.id, { id: booth.id, x: right, y: alignY(booth) });
           right += Number(booth.width || 0);
         }
         const values = [...positions.values()];
@@ -6407,18 +6934,18 @@ const App = (() => {
         }
         values.forEach((item) => { item.x += shift; });
       } else {
-        const centerX = boothCenterX(base);
+        const alignX = (booth) => edge === "end" ? boothRight(base) - Number(booth.width || 0) : boothLeft(base);
         let top = Number(base.y || 0);
         let bottom = Number(base.y || 0) + Number(base.height || 0);
-        positions.set(base.id, { id: base.id, x: centerX - Number(base.width || 0) / 2, y: Number(base.y || 0) });
+        positions.set(base.id, { id: base.id, x: alignX(base), y: Number(base.y || 0) });
         for (let index = baseIndex - 1; index >= 0; index -= 1) {
           const booth = ordered[index];
           top -= Number(booth.height || 0);
-          positions.set(booth.id, { id: booth.id, x: centerX - Number(booth.width || 0) / 2, y: top });
+          positions.set(booth.id, { id: booth.id, x: alignX(booth), y: top });
         }
         for (let index = baseIndex + 1; index < ordered.length; index += 1) {
           const booth = ordered[index];
-          positions.set(booth.id, { id: booth.id, x: centerX - Number(booth.width || 0) / 2, y: bottom });
+          positions.set(booth.id, { id: booth.id, x: alignX(booth), y: bottom });
           bottom += Number(booth.height || 0);
         }
         const values = [...positions.values()];
@@ -6432,6 +6959,7 @@ const App = (() => {
         }
         values.forEach((item) => { item.y += shift; });
       }
+      const label = boothAlignmentLabel(axis, edge);
       const finalPositions = [...positions.values()].map((item) => ({
         id: item.id,
         x: preciseCoord(item.x),
@@ -6441,7 +6969,7 @@ const App = (() => {
       await run(() => api("/api/booths/batch", {
         method: "POST",
         body: { ids: selected.map((booth) => booth.id), positions: finalPositions }
-      }), horizontal ? `已沿基点 ${base.boothNo} 的中心 X 轴贴合` : `已沿基点 ${base.boothNo} 的中心 Y 轴贴合`);
+      }), `已沿 ${axis.toUpperCase()} 轴按基点 ${base.boothNo} ${label}并贴合`);
     },
     async clearAllBooths() {
       if (!window.confirm("确认清空全部展位？该操作只允许在没有未结束订单时执行。")) return;
@@ -6451,6 +6979,7 @@ const App = (() => {
       state.selectedBoothId = null;
       state.selectedBoothIds.clear();
       state.selectedObstacleId = null;
+      state.selectedActivityAreaId = null;
     },
     async generateGrid(replace) {
       const confirmText = replace ? "确认重置现有展位为 520 个样例展位？" : "确认追加 520 个样例展位？";
@@ -6654,6 +7183,7 @@ const App = (() => {
             noticeDaysBeforeRelease: Number(byId("rule-notice").value || 0),
             newCustomerProtectDays: Number(byId("rule-new-customer-days").value || 0),
             oldCustomerProtectDays: Number(byId("rule-old-customer-days").value || 0),
+            adminContactMaskMode: byId("rule-admin-contact-mask-mode")?.value || "off",
             contractApprovedVoucherWorkdays: Number(byId("rule-contract-voucher-workdays")?.value ?? state.data.settings.rules.contractApprovedVoucherWorkdays ?? state.data.settings.rules.reserveWorkdays ?? 7),
             salesFlowMode: byId("rule-sales-flow")?.value || "voucher_direct",
             customerTargetMode: byId("rule-customer-target-mode")?.value || "sales",
@@ -6677,6 +7207,7 @@ const App = (() => {
       rules.noticeDaysBeforeRelease = Number(byId("rule-notice")?.value ?? rules.noticeDaysBeforeRelease ?? 0);
       rules.newCustomerProtectDays = Number(byId("rule-new-customer-days")?.value ?? rules.newCustomerProtectDays ?? 30);
       rules.oldCustomerProtectDays = Number(byId("rule-old-customer-days")?.value ?? rules.oldCustomerProtectDays ?? 30);
+      rules.adminContactMaskMode = byId("rule-admin-contact-mask-mode")?.value || rules.adminContactMaskMode || "off";
       rules.contractApprovedVoucherWorkdays = Number(byId("rule-contract-voucher-workdays")?.value ?? rules.contractApprovedVoucherWorkdays ?? rules.reserveWorkdays ?? 7);
       rules.salesFlowMode = byId("rule-sales-flow")?.value || "voucher_direct";
       rules.customerTargetMode = byId("rule-customer-target-mode")?.value || rules.customerTargetMode || "sales";
@@ -6940,6 +7471,25 @@ const App = (() => {
         body: { departmentId: Number(departmentId || 0) || null }
       }), "账号部门已更新");
     },
+    async changeMyPassword() {
+      const currentPassword = byId("self-current-password")?.value || "";
+      const newPassword = byId("self-new-password")?.value || "";
+      const confirmPassword = byId("self-confirm-password")?.value || "";
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        state.error = "请填写原密码、新密码和确认密码";
+        render();
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        state.error = "两次输入的新密码不一致";
+        render();
+        return;
+      }
+      await run(() => api("/api/me/password", {
+        method: "PUT",
+        body: { currentPassword, newPassword }
+      }), "密码已修改");
+    },
     async createUser() {
       await run(() => api("/api/users", {
         method: "POST",
@@ -6951,6 +7501,18 @@ const App = (() => {
           departmentId: Number(byId("new-department")?.value || 0) || null
         }
       }), "账号已创建");
+    },
+    async deleteUser(userId) {
+      const target = state.data.users.find((user) => Number(user.id) === Number(userId));
+      if (!target) return;
+      const orders = userOrderCount(userId);
+      if (orders > 0) {
+        state.error = `账号已有 ${orders} 个订单，不能删除`;
+        render();
+        return;
+      }
+      if (!window.confirm(`确认删除账号“${target.displayName || target.username}”？`)) return;
+      await run(() => api(`/api/users/${userId}`, { method: "DELETE" }), "账号已删除");
     },
     async saveCatalog() {
       await run(async () => {
