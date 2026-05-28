@@ -838,6 +838,12 @@ label {
   min-width: 130px;
 }
 
+.map-toolbar-section {
+  position: sticky;
+  top: 84px;
+  z-index: 4;
+}
+
 .search-control {
   display: flex;
   align-items: end;
@@ -1035,6 +1041,34 @@ label {
   stroke: #ffcf33;
   stroke-width: 4;
   filter: drop-shadow(0 0 5px rgba(255, 207, 51, 0.85));
+}
+
+.activity-area-rect {
+  fill: rgba(14, 165, 233, 0.24);
+  stroke: #0284c7;
+  stroke-width: 1.8;
+  stroke-dasharray: 6 4;
+  cursor: pointer;
+}
+
+.activity-area-rect.selected {
+  stroke: #ffcf33;
+  stroke-width: 4;
+  filter: drop-shadow(0 0 5px rgba(255, 207, 51, 0.85));
+}
+
+.activity-area-group.readonly,
+.activity-area-group.readonly * {
+  pointer-events: none;
+}
+
+.activity-area-text {
+  fill: #075985;
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+  text-anchor: middle;
+  dominant-baseline: middle;
 }
 
 .obstacle-text {
@@ -1528,6 +1562,27 @@ tr:last-child td {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.axis-align-control {
+  display: inline-flex;
+  align-items: end;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fbff;
+}
+
+.axis-align-control label {
+  min-width: 136px;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.axis-align-control select {
+  width: 136px;
+  padding: 7px 8px;
 }
 
 .inline-actions {
