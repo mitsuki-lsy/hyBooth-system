@@ -420,6 +420,14 @@ label {
   gap: 20px;
 }
 
+.flash-area {
+  position: sticky;
+  top: 76px;
+  z-index: 6;
+  display: grid;
+  gap: 8px;
+}
+
 .section {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -872,12 +880,28 @@ label {
   height: calc(100vh - 190px);
   min-height: 440px;
   position: relative;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .booth-svg {
   min-width: 0;
   display: block;
   background: #f7f9fc;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.booth-svg * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body.map-interacting {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
 }
 
 .draw-preset-panel {

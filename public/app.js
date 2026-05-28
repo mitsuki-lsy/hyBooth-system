@@ -12,6 +12,7 @@ const App = (() => {
     selectedBoothIds: new Set(),
     pendingBoothIds: [],
     selectedBoothId: null,
+    batchDragMode: false,
     mapZoom: "fit",
     fitMapZoom: 1,
     boothPickerOpen: false,
@@ -114,7 +115,9 @@ const App = (() => {
     suppressObstacleClick: false,
     activityAreaMode: false,
     activityAreaDrawing: null,
+    activityAreaDragging: null,
     selectedActivityAreaId: null,
+    suppressActivityAreaClick: false,
     dragging: null,
     drawMode: false,
     countdownTimer: null
@@ -1226,6 +1229,25 @@ const App = (() => {
     state.data.activityAreas = Array.isArray(state.data.activityAreas) ? state.data.activityAreas : [];
   }
 
+  function replaceById(collectionName, item) {
+    if (!item || !state.data || !Array.isArray(state.data[collectionName])) return;
+    const index = state.data[collectionName].findIndex((entry) => Number(entry.id) === Number(item.id));
+    if (index >= 0) state.data[collectionName][index] = item;
+    else state.data[collectionName].push(item);
+  }
+
+  function applyBoothResult(result) {
+    replaceById("booths", result?.booth);
+  }
+
+  function applyObstacleResult(result) {
+    replaceById("obstacles", result?.obstacle);
+  }
+
+  function applyActivityAreaResult(result) {
+    replaceById("activityAreas", result?.activityArea);
+  }
+
   async function loadLoginEvents() {
     try {
       const result = await api("/api/public/events");
@@ -1244,7 +1266,7 @@ const App = (() => {
       const result = await action();
       if (options.refresh !== false) await refresh();
       if (typeof options.apply === "function") options.apply(result);
-      state.message = success || "操作成功";
+      state.message = options.silent ? "" : (success || "操作成功");
       render();
       return result;
     } catch (error) {
@@ -1256,7 +1278,8 @@ const App = (() => {
   }
 
   function flashHtml() {
-    return `${state.error ? `<div class="error">${h(state.error)}</div>` : ""}${state.message ? `<div class="success-message">${h(state.message)}</div>` : ""}`;
+    const html = `${state.error ? `<div class="error">${h(state.error)}</div>` : ""}${state.message ? `<div class="success-message">${h(state.message)}</div>` : ""}`;
+    return html ? `<div class="flash-area">${html}</div>` : "";
   }
 
   function menu() {
@@ -1453,23 +1476,25 @@ const App = (() => {
   }
 
   function globalSearchBox() {
-    if (!state.data || state.data.me.role === "enterprise") return "";
+    if (!state.data || state.data.me.role === "enterprise" || state.view === "accounts") return "";
     const query = state.globalSearchQuery || "";
     const results = globalSearchResults(query);
-    const isOpen = state.globalSearchOpen && query.trim();
+    const isOpen = state.globalSearchOpen && query.trim() && results.length;
     return `
       <div class="global-search">
         <input
           id="global-search-input"
           value="${h(query)}"
+          autocomplete="off"
           placeholder="搜索企业 / 订单 / 展位"
           onfocus="App.openGlobalSearch()"
           oninput="App.setGlobalSearch(this.value)"
+          onblur="App.closeGlobalSearchSoon()"
         >
         ${query ? `<button type="button" class="global-search-clear" onclick="App.clearGlobalSearch()">×</button>` : ""}
         ${isOpen ? `
           <div class="global-search-panel">
-            ${results.length ? results.map(globalSearchResultRow).join("") : `<div class="global-search-empty">没有匹配结果</div>`}
+            ${results.map(globalSearchResultRow).join("")}
           </div>
         ` : ""}
       </div>
@@ -3197,7 +3222,7 @@ const App = (() => {
     const displayWidth = Math.round(map.width * zoom);
     const displayHeight = Math.round(map.height * zoom);
     return `
-      <svg id="boothSvg" class="booth-svg" style="width:${displayWidth}px;height:${displayHeight}px" viewBox="0 0 ${map.width} ${map.height}" onmousedown="App.mapDown(event)" onmousemove="App.mapMove(event)" onmouseup="App.mapUp(event)" onmouseleave="App.mapUp(event)">
+      <svg id="boothSvg" class="booth-svg" style="width:${displayWidth}px;height:${displayHeight}px" viewBox="0 0 ${map.width} ${map.height}" onmousedown="App.mapDown(event)" onmousemove="App.mapMove(event)" onmouseup="App.mapUp(event)" onmouseleave="App.mapUp(event)" onselectstart="return false" ondragstart="return false">
         ${bg}
         <text x="28" y="34" fill="#536176" font-size="18">展位图 · ${state.data.booths.length} 个展位</text>
         ${booths}
@@ -3250,6 +3275,7 @@ const App = (() => {
       </div>
       <div class="split-actions">
         <button class="secondary" onclick="App.batchUpdateBooths()">批量更新</button>
+        <button class="${state.batchDragMode ? "success" : "secondary"}" onclick="App.toggleBatchDragMode()">${state.batchDragMode ? "批量拖动中" : "批量拖动"}</button>
         <span class="axis-align-control">
           <label>沿 X 轴<select id="booth-align-x-mode">
             <option value="align:start">上对齐</option>
@@ -4553,6 +4579,47 @@ const App = (() => {
     return point.matrixTransform(matrix);
   }
 
+  function clearTextSelection() {
+    const selection = window.getSelection?.();
+    if (selection && selection.rangeCount) selection.removeAllRanges();
+  }
+
+  function beginMapPointerInteraction(event) {
+    event?.preventDefault?.();
+    document.body.classList.add("map-interacting");
+    clearTextSelection();
+  }
+
+  function endMapPointerInteraction() {
+    document.body.classList.remove("map-interacting");
+    clearTextSelection();
+  }
+
+  function hasMapPointerInteraction() {
+    return Boolean(
+      state.dragging
+      || state.obstacleDragging
+      || state.activityAreaDragging
+      || state.selecting
+      || state.drawing
+      || state.obstacleDrawing
+      || state.activityAreaDrawing
+    );
+  }
+
+  function updateBoothSvgPosition(booth) {
+    const rect = document.querySelector(`g[data-booth-id="${booth.id}"] rect`);
+    const text = document.querySelector(`g[data-booth-id="${booth.id}"] text`);
+    if (rect) {
+      rect.setAttribute("x", booth.x);
+      rect.setAttribute("y", booth.y);
+    }
+    if (text) {
+      text.setAttribute("x", Number(booth.x || 0) + Number(booth.width || 0) / 2);
+      text.setAttribute("y", Number(booth.y || 0) + Number(booth.height || 0) / 2);
+    }
+  }
+
   function rectFromPoints(start, end) {
     return {
       x: Math.min(start.x, end.x),
@@ -5083,6 +5150,7 @@ const App = (() => {
       state.changePickerOpen = false;
       state.eventRoleModal = null;
       state.eventCreateModalOpen = false;
+      state.globalSearchQuery = "";
       state.globalSearchOpen = false;
       render();
     },
@@ -5397,6 +5465,14 @@ const App = (() => {
       state.globalSearchQuery = "";
       state.globalSearchOpen = false;
       render();
+    },
+    closeGlobalSearchSoon() {
+      setTimeout(() => {
+        const input = byId("global-search-input");
+        if (input && document.activeElement === input) return;
+        state.globalSearchOpen = false;
+        render();
+      }, 120);
     },
     openGlobalSearchResult(type, id) {
       state.globalSearchQuery = "";
@@ -5860,7 +5936,7 @@ const App = (() => {
       const obstacleGroup = event.target.closest("g[data-obstacle-id]");
       const activityAreaGroup = event.target.closest("g[data-activity-area-id]");
       if (state.obstacleMode) {
-        event.preventDefault();
+        beginMapPointerInteraction(event);
         state.obstacleDrawing = {
           start: svgPoint(event),
           type: state.obstacleMode
@@ -5868,20 +5944,30 @@ const App = (() => {
         return;
       }
       if (state.activityAreaMode) {
-        event.preventDefault();
+        beginMapPointerInteraction(event);
         state.activityAreaDrawing = svgPoint(event);
         return;
       }
       if (activityAreaGroup) {
         if (state.drawMode) return;
         const areaId = Number(activityAreaGroup.dataset.activityAreaId);
-        if (!(state.data.activityAreas || []).some((item) => item.id === areaId)) return;
-        event.preventDefault();
+        const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
+        if (!area) return;
+        const start = svgPoint(event);
+        beginMapPointerInteraction(event);
         state.selectedActivityAreaId = areaId;
         state.selectedBoothId = null;
         state.selectedBoothIds.clear();
         state.selectedObstacleId = null;
-        render();
+        state.mapActivityAreaDragSnapshot = cloneMapSnapshot();
+        state.activityAreaDragging = {
+          areaId,
+          startX: start.x,
+          startY: start.y,
+          originalX: Number(area.x || 0),
+          originalY: Number(area.y || 0),
+          moved: false
+        };
         return;
       }
       if (obstacleGroup) {
@@ -5890,7 +5976,7 @@ const App = (() => {
         const obstacle = (state.data.obstacles || []).find((item) => item.id === obstacleId);
         if (!obstacle) return;
         const start = svgPoint(event);
-        event.preventDefault();
+        beginMapPointerInteraction(event);
         state.selectedObstacleId = obstacleId;
         state.selectedActivityAreaId = null;
         if (obstacle.boothId) state.selectedBoothId = Number(obstacle.boothId);
@@ -5910,21 +5996,32 @@ const App = (() => {
         const booth = state.data.booths.find((item) => item.id === boothId);
         if (!booth || booth.status === "sold" || booth.locked) return;
         const start = svgPoint(event);
+        beginMapPointerInteraction(event);
         state.selectedBoothId = boothId;
         state.selectedActivityAreaId = null;
         state.mapDragSnapshot = cloneMapSnapshot();
+        const batchBooths = state.batchDragMode && state.selectedBoothIds.has(boothId)
+          ? [...state.selectedBoothIds]
+            .map((id) => state.data.booths.find((item) => item.id === id))
+            .filter((item) => item && item.status !== "sold" && !item.locked)
+          : [];
         state.dragging = {
           boothId,
+          boothIds: batchBooths.length > 1 ? batchBooths.map((item) => item.id) : [boothId],
           startX: start.x,
           startY: start.y,
           originalX: booth.x,
           originalY: booth.y,
+          originalPositions: Object.fromEntries((batchBooths.length > 1 ? batchBooths : [booth]).map((item) => [
+            item.id,
+            { x: Number(item.x || 0), y: Number(item.y || 0), width: Number(item.width || 0), height: Number(item.height || 0) }
+          ])),
           moved: false
         };
         return;
       }
       if (!state.drawMode && !group) {
-        event.preventDefault();
+        beginMapPointerInteraction(event);
         state.selecting = {
           start: svgPoint(event),
           additive: event.shiftKey || event.ctrlKey || event.metaKey
@@ -5932,10 +6029,11 @@ const App = (() => {
         return;
       }
       if (!state.drawMode || group) return;
-      event.preventDefault();
+      beginMapPointerInteraction(event);
       state.drawing = svgPoint(event);
     },
     mapMove(event) {
+      if (hasMapPointerInteraction()) event.preventDefault();
       if (state.obstacleDrawing) {
         const rect = rectFromPoints(state.obstacleDrawing.start, svgPoint(event));
         updatePreviewRect("obstacle-preview", rect, {
@@ -5980,6 +6078,33 @@ const App = (() => {
         }
         return;
       }
+      if (state.activityAreaDragging) {
+        const point = svgPoint(event);
+        const dx = Math.round(point.x - state.activityAreaDragging.startX);
+        const dy = Math.round(point.y - state.activityAreaDragging.startY);
+        if (Math.abs(dx) + Math.abs(dy) < 1) return;
+        const area = (state.data.activityAreas || []).find((item) => item.id === state.activityAreaDragging.areaId);
+        if (!area) return;
+        const rect = clampRectToMap({
+          ...area,
+          x: state.activityAreaDragging.originalX + dx,
+          y: state.activityAreaDragging.originalY + dy
+        });
+        area.x = rect.x;
+        area.y = rect.y;
+        state.activityAreaDragging.moved = true;
+        const shapeElement = document.querySelector(`g[data-activity-area-id="${area.id}"] rect`);
+        const text = document.querySelector(`g[data-activity-area-id="${area.id}"] text`);
+        if (shapeElement) {
+          shapeElement.setAttribute("x", area.x);
+          shapeElement.setAttribute("y", area.y);
+        }
+        if (text) {
+          text.setAttribute("x", Number(area.x) + Number(area.width || 0) / 2);
+          text.setAttribute("y", Number(area.y) + Number(area.height || 0) / 2);
+        }
+        return;
+      }
       if (state.selecting) {
         const rect = rectFromPoints(state.selecting.start, svgPoint(event));
         updatePreviewRect("selection-preview", rect, {
@@ -6006,23 +6131,28 @@ const App = (() => {
       const dx = Math.round(point.x - state.dragging.startX);
       const dy = Math.round(point.y - state.dragging.startY);
       if (Math.abs(dx) + Math.abs(dy) < 1) return;
-      const booth = state.data.booths.find((item) => item.id === state.dragging.boothId);
-      if (!booth) return;
-      booth.x = Math.max(0, state.dragging.originalX + dx);
-      booth.y = Math.max(0, state.dragging.originalY + dy);
+      const dragIds = Array.isArray(state.dragging.boothIds) && state.dragging.boothIds.length ? state.dragging.boothIds : [state.dragging.boothId];
+      const originals = state.dragging.originalPositions || {};
+      const draggedBooths = dragIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
+      if (!draggedBooths.length) return;
+      const map = state.data.map || {};
+      const originalRects = draggedBooths.map((booth) => originals[booth.id] || { x: Number(booth.x || 0), y: Number(booth.y || 0), width: Number(booth.width || 0), height: Number(booth.height || 0) });
+      const minX = Math.min(...originalRects.map((rect) => Number(rect.x || 0)));
+      const minY = Math.min(...originalRects.map((rect) => Number(rect.y || 0)));
+      const maxX = Math.max(...originalRects.map((rect) => Number(rect.x || 0) + Number(rect.width || 0)));
+      const maxY = Math.max(...originalRects.map((rect) => Number(rect.y || 0) + Number(rect.height || 0)));
+      const clampedDx = Math.min(Math.max(dx, -minX), Math.max(0, Number(map.width || maxX) - maxX));
+      const clampedDy = Math.min(Math.max(dy, -minY), Math.max(0, Number(map.height || maxY) - maxY));
       state.dragging.moved = true;
-      const rect = document.querySelector(`g[data-booth-id="${booth.id}"] rect`);
-      const text = document.querySelector(`g[data-booth-id="${booth.id}"] text`);
-      if (rect) {
-        rect.setAttribute("x", booth.x);
-        rect.setAttribute("y", booth.y);
-      }
-      if (text) {
-        text.setAttribute("x", booth.x + booth.width / 2);
-        text.setAttribute("y", booth.y + booth.height / 2);
-      }
+      draggedBooths.forEach((booth) => {
+        const original = originals[booth.id] || { x: Number(booth.x || 0), y: Number(booth.y || 0) };
+        booth.x = Number(original.x || 0) + clampedDx;
+        booth.y = Number(original.y || 0) + clampedDy;
+        updateBoothSvgPosition(booth);
+      });
     },
     async mapUp(event) {
+      endMapPointerInteraction();
       if (state.obstacleDrawing) {
         const drawing = state.obstacleDrawing;
         state.obstacleDrawing = null;
@@ -6087,7 +6217,7 @@ const App = (() => {
             const result = await run(() => api(`/api/obstacles/${obstacle.id}`, {
               method: "PUT",
               body: { x: Math.round(obstacle.x), y: Math.round(obstacle.y) }
-            }), "障碍物位置已保存");
+            }), "障碍物位置已自动保存", { refresh: false, apply: applyObstacleResult, silent: true });
             if (!result) {
               const current = (state.data.obstacles || []).find((item) => item.id === drag.obstacleId);
               if (current) {
@@ -6100,6 +6230,43 @@ const App = (() => {
           }
         }
         if (!drag.moved) state.mapObstacleDragSnapshot = null;
+        return;
+      }
+      if (state.activityAreaDragging) {
+        const drag = state.activityAreaDragging;
+        state.activityAreaDragging = null;
+        state.suppressActivityAreaClick = drag.moved;
+        if (drag.moved) {
+          setTimeout(() => {
+            state.suppressActivityAreaClick = false;
+          }, 150);
+          const area = (state.data.activityAreas || []).find((item) => item.id === drag.areaId);
+          if (area) {
+            const scroll = captureMapScroll();
+            if (state.mapActivityAreaDragSnapshot) {
+              state.mapUndoStack.push(state.mapActivityAreaDragSnapshot);
+              if (state.mapUndoStack.length > 30) state.mapUndoStack.shift();
+              state.mapRedoStack = [];
+              state.mapActivityAreaDragSnapshot = null;
+            }
+            const result = await run(() => api(`/api/activity-areas/${area.id}`, {
+              method: "PUT",
+              body: { x: Math.round(area.x), y: Math.round(area.y) }
+            }), "活动区位置已自动保存", { refresh: false, apply: applyActivityAreaResult, silent: true });
+            if (!result) {
+              const current = (state.data.activityAreas || []).find((item) => item.id === drag.areaId);
+              if (current) {
+                current.x = drag.originalX;
+                current.y = drag.originalY;
+                render();
+              }
+            }
+            restoreMapScroll(scroll);
+          }
+        } else {
+          state.mapActivityAreaDragSnapshot = null;
+          render();
+        }
         return;
       }
       if (state.selecting) {
@@ -6128,8 +6295,9 @@ const App = (() => {
         const drag = state.dragging;
         state.dragging = null;
         if (drag.moved) {
-          const booth = state.data.booths.find((item) => item.id === drag.boothId);
-          if (booth) {
+          const dragIds = Array.isArray(drag.boothIds) && drag.boothIds.length ? drag.boothIds : [drag.boothId];
+          const booths = dragIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
+          if (booths.length) {
             const scroll = captureMapScroll();
             if (state.mapDragSnapshot) {
               state.mapUndoStack.push(state.mapDragSnapshot);
@@ -6137,10 +6305,32 @@ const App = (() => {
               state.mapRedoStack = [];
               state.mapDragSnapshot = null;
             }
-            await run(() => api(`/api/booths/${booth.id}`, {
-              method: "PUT",
-              body: { x: booth.x, y: booth.y }
-            }), "展位位置已保存");
+            const result = booths.length > 1
+              ? await run(() => api("/api/booths/batch", {
+                method: "POST",
+                body: {
+                  ids: booths.map((booth) => booth.id),
+                  positions: booths.map((booth) => ({ id: booth.id, x: Math.round(booth.x), y: Math.round(booth.y) }))
+                }
+              }), `已自动保存 ${booths.length} 个展位位置`, {
+                refresh: false,
+                apply: (result) => (result?.booths || []).forEach((item) => replaceById("booths", item)),
+                silent: true
+              })
+              : await run(() => api(`/api/booths/${booths[0].id}`, {
+                method: "PUT",
+                body: { x: Math.round(booths[0].x), y: Math.round(booths[0].y) }
+              }), "展位位置已自动保存", { refresh: false, apply: applyBoothResult, silent: true });
+            if (!result) {
+              Object.entries(drag.originalPositions || {}).forEach(([id, position]) => {
+                const current = state.data.booths.find((item) => Number(item.id) === Number(id));
+                if (current) {
+                  current.x = position.x;
+                  current.y = position.y;
+                }
+              });
+              render();
+            }
             restoreMapScroll(scroll);
           }
         }
@@ -6205,6 +6395,10 @@ const App = (() => {
     },
     activityAreaClick(event, areaId) {
       event.stopPropagation();
+      if (state.suppressActivityAreaClick) {
+        state.suppressActivityAreaClick = false;
+        return;
+      }
       if (!isAdminLikeRole(state.data.me.role)) return;
       const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
       if (!area) return;
@@ -6324,7 +6518,7 @@ const App = (() => {
           width: Math.round(next.rect.width),
           height: Math.round(next.rect.height)
         }
-      }), "障碍物尺寸已保存，相关展位价格已重新计算");
+      }), "障碍物尺寸已保存，相关展位价格已重新计算", { refresh: false, apply: applyObstacleResult });
       if (result) {
         state.obstacleSizePreviewHistoryId = null;
         restoreMapScroll(scroll);
@@ -6373,7 +6567,7 @@ const App = (() => {
           width: Math.round(width),
           height: Math.round(height)
         }
-      }), "活动区已保存");
+      }), "活动区已保存", { refresh: false, apply: applyActivityAreaResult });
       if (result) {
         state.activityAreaSizePreviewHistoryId = null;
         restoreMapScroll(scroll);
@@ -6404,11 +6598,17 @@ const App = (() => {
       }
       render();
     },
+    toggleBatchDragMode() {
+      state.batchDragMode = !state.batchDragMode;
+      state.message = state.batchDragMode ? "批量拖动已开启：拖动任意已选展位会同步移动所有已选展位" : "批量拖动已关闭";
+      render();
+    },
     clearBoothSelection() {
       state.selectedBoothIds.clear();
       state.pendingBoothIds = [];
       state.selectedBoothId = null;
       state.selectedActivityAreaId = null;
+      state.batchDragMode = false;
       render();
     },
     useSelectedBooths() {
@@ -6681,7 +6881,7 @@ const App = (() => {
           width: meterToPx(widthM || booth.widthM),
           height: meterToPx(depthM || booth.depthM)
         }
-      }), "展位已保存");
+      }), "展位已保存", { refresh: false, apply: applyBoothResult });
       if (result) state.boothSizePreviewHistoryId = null;
     },
     previewBoothSize() {
