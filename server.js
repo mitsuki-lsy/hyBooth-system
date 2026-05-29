@@ -381,6 +381,30 @@ function userDepartmentId(db, userId) {
   return Number(db.users.find((item) => Number(item.id) === Number(userId))?.departmentId || 0) || null;
 }
 
+function canAccessBoothDepartment(db, user, booth) {
+  const departmentId = Number(booth?.departmentId || 0);
+  if (!departmentId) return true;
+  if (isSuperAdmin(user)) return true;
+  return Number(user?.departmentId || 0) === departmentId;
+}
+
+function canOrderUseBoothDepartment(db, order, booth) {
+  const departmentId = Number(booth?.departmentId || 0);
+  if (!departmentId) return true;
+  const salespersonDepartmentId = userDepartmentId(db, order?.salespersonId);
+  return Boolean(salespersonDepartmentId && Number(salespersonDepartmentId) === departmentId);
+}
+
+function boothForUser(db, user, booth) {
+  if (canAccessBoothDepartment(db, user, booth)) return booth;
+  return {
+    ...booth,
+    status: booth.status === "available" ? "disabled" : booth.status,
+    actualStatus: booth.status,
+    departmentRestricted: true
+  };
+}
+
 function contactScopeForOwner(db, ownerSalesId) {
   const salesId = Number(ownerSalesId || 0);
   if (!salesId) return "";
@@ -1407,6 +1431,8 @@ function normalizeDb(db) {
   db.booths.forEach((booth) => {
     booth.hall = String(booth.hall || db.settings.halls[0] || "1鍙烽").trim();
     booth.locked = Boolean(booth.locked);
+    booth.departmentId = Number(booth.departmentId || 0) || null;
+    if (booth.departmentId && !departmentIds.has(Number(booth.departmentId))) booth.departmentId = null;
   });
   db.companies.forEach((company) => {
     company.shortName = String(company.shortName || "").trim();
@@ -1660,8 +1686,8 @@ function scaleBoothsToMap(db, oldWidth, oldHeight, newWidth, newHeight) {
 function resizeBoothsByPhysicalSize(db) {
   const scale = Math.max(1, Number(db.map?.scalePxPerMeter || 16));
   eventBooths(db).forEach((booth) => {
-    booth.width = Math.max(1, Math.round(Number(booth.widthM || 0) * scale));
-    booth.height = Math.max(1, Math.round(Number(booth.depthM || 0) * scale));
+    booth.width = Number(Math.max(1, Number(booth.widthM || 0) * scale).toFixed(3));
+    booth.height = Number(Math.max(1, Number(booth.depthM || 0) * scale).toFixed(3));
     booth.area = Number((Number(booth.widthM || 0) * Number(booth.depthM || 0)).toFixed(2));
     refreshBoothBilling(db, booth);
     booth.updatedAt = nowIso();
@@ -2022,6 +2048,7 @@ function applyChangeRequest(db, request) {
     const booths = boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || order.eventId) === String(order.eventId)));
     if (booths.some((booth) => !booth)) return { ok: false, status: 404, error: "鏂板睍浣嶄笉瀛樺湪" };
     if (booths.some((booth) => booth.status !== "available")) return { ok: false, status: 409, error: "鏂板睍浣嶅凡琚崰鐢紝涓嶈兘閫氳繃璇ュ彉鏇?" };
+    if (booths.some((booth) => !canOrderUseBoothDepartment(db, order, booth))) return { ok: false, status: 403, error: "新展位不属于订单业务员部门，不能通过该变更" };
 
     order.boothIds.forEach((boothId) => {
       const booth = db.booths.find((item) => item.id === boothId && item.orderId === order.id);
@@ -2119,7 +2146,7 @@ function buildBootstrap(db, user) {
       ? db.orders.filter((order) => order.status === "sold" && eventCategoryById(db, order.eventId) === currentEventCategory)
       : [];
   const currentMap = ensureEventMap(db, eventId);
-  const visibleEventBooths = eventBooths(db, eventId);
+  const visibleEventBooths = eventBooths(db, eventId).map((booth) => boothForUser(db, user, booth));
   const visibleEventObstacles = eventObstacles(db, eventId);
   const visibleActivityAreas = eventActivityAreas(db, eventId);
   const eventLeads = db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId));
@@ -2535,7 +2562,8 @@ async function handleApi(req, res, url, body = {}) {
 
   if (pathname === "/api/settings" && method === "PUT") {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
-    const incomingRules = body.rules || {};
+    const incomingRules = { ...(body.rules || {}) };
+    if (!isSuperAdmin(user)) delete incomingRules.adminContactMaskMode;
     const hasEnterpriseLinkDays = incomingRules.enterpriseLinkDays !== undefined;
     db.settings.rules = { ...db.settings.rules, ...incomingRules };
     db.settings.rules.adminContactMaskMode = adminContactMaskMode(db);
@@ -2748,7 +2776,7 @@ async function handleApi(req, res, url, body = {}) {
     const oldHeight = Number(map.height || 1);
     if (body.width) map.width = Number(body.width);
     if (body.height) map.height = Number(body.height);
-    if (body.scalePxPerMeter) map.scalePxPerMeter = Math.max(1, Number(body.scalePxPerMeter));
+    if (body.scalePxPerMeter) map.scalePxPerMeter = Number(Math.max(1, Number(body.scalePxPerMeter)).toFixed(1));
     if (body.scaleBooths && oldWidth > 0 && oldHeight > 0) {
       scaleBoothsToMap(db, oldWidth, oldHeight, map.width, map.height);
     }
@@ -2776,12 +2804,20 @@ async function handleApi(req, res, url, body = {}) {
       incomingBoothNos.add(key);
     }
     const snapshotById = new Map(incomingBooths.map((booth) => [Number(booth.id), booth]));
+    const snapshotCompareKeys = ["boothNo", "x", "y", "width", "height", "area", "widthM", "depthM", "hall", "zone", "attr", "status", "departmentId", "orderId", "reservedAt", "reservedBy"];
+    const changedUnauthorized = eventBooths(db, eventId)
+      .filter((booth) => !canAccessBoothDepartment(db, user, booth))
+      .filter((booth) => {
+        const next = snapshotById.get(Number(booth.id));
+        if (!next) return true;
+        return snapshotCompareKeys.some((key) => String(next[key] ?? "") !== String(booth[key] ?? ""));
+      });
+    if (changedUnauthorized.length) return sendError(res, 403, `不能恢复或覆盖其它部门展位：${changedUnauthorized.map((booth) => booth.boothNo).join(" / ")}`);
     const protectedBooths = eventBooths(db, eventId).filter((booth) => !canDeleteBooth(db, booth));
     const changedProtected = protectedBooths.filter((booth) => {
       const next = snapshotById.get(Number(booth.id));
       if (!next) return true;
-      const keys = ["boothNo", "x", "y", "width", "height", "area", "widthM", "depthM", "hall", "zone", "attr", "status", "orderId", "reservedAt", "reservedBy"];
-      return keys.some((key) => String(next[key] ?? "") !== String(booth[key] ?? ""));
+      return snapshotCompareKeys.some((key) => String(next[key] ?? "") !== String(booth[key] ?? ""));
     });
     if (changedProtected.length) return sendError(res, 409, `鏈夊凡棰勭暀/鎴愪氦/閿佸畾灞曚綅锛屼笉鑳介€氳繃鎾ら攢瑕嗙洊锛?{changedProtected.map((booth) => booth.boothNo).join(" / ")}`);
     const boothIds = new Set();
@@ -2800,6 +2836,7 @@ async function handleApi(req, res, url, body = {}) {
         hall: String(item.hall || db.settings.halls[0] || "1鍙烽").trim(),
         zone: String(item.zone || zoneName(db.settings.zones[0]) || "A鍖?").trim(),
         attr: item.attr === "raw" ? "raw" : "standard",
+        departmentId: Number(item.departmentId || 0) || null,
         price: Number(item.price || 0),
         status: ["available", "reserved", "pending_payment_review", "sold", "disabled"].includes(item.status) ? item.status : "available",
         orderId: item.orderId || null,
@@ -2874,6 +2911,7 @@ async function handleApi(req, res, url, body = {}) {
       attr: body.attr || "standard",
       price: 0,
       status: "available",
+      departmentId: Number(body.departmentId || 0) || null,
       orderId: null,
       reservedAt: null,
       reservedBy: null,
@@ -2892,8 +2930,10 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
     const booth = db.booths.find((item) => item.id === Number(boothMatch[1]) && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!booth) return sendError(res, 404, "灞曚綅涓嶅瓨鍦?");
+    if (!canAccessBoothDepartment(db, user, booth)) return sendError(res, 403, "该展位不属于当前部门，不能编辑");
     if (booth.status === "sold") return sendError(res, 409, "宸叉垚浜ゅ睍浣嶄笉鍙洿鎺ョ紪杈?");
     if (booth.locked && body.locked !== false) return sendError(res, 409, "灞曚綅宸查攣瀹氾紝璇峰厛瑙ｉ攣鍐嶇紪杈?");
+    if (body.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     if (body.boothNo !== undefined) {
       const boothNo = String(body.boothNo || "").trim();
       const noError = boothNoValidationError(db, boothNo, db.settings.event.id, booth.id);
@@ -2903,6 +2943,7 @@ async function handleApi(req, res, url, body = {}) {
     ["boothNo", "hall", "zone", "attr", "status"].forEach((key) => {
       if (body[key] !== undefined) booth[key] = body[key];
     });
+    if (body.departmentId !== undefined) booth.departmentId = Number(body.departmentId || 0) || null;
     ["x", "y", "width", "height", "area", "widthM", "depthM"].forEach((key) => {
       if (body[key] !== undefined) booth[key] = Number(body[key]);
     });
@@ -2919,6 +2960,7 @@ async function handleApi(req, res, url, body = {}) {
     const boothId = Number(boothMatch[1]);
     const booth = db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!booth) return sendError(res, 404, "灞曚綅涓嶅瓨鍦?");
+    if (!canAccessBoothDepartment(db, user, booth)) return sendError(res, 403, "不能删除其它部门展位");
     if (!canDeleteBooth(db, booth)) return sendError(res, 409, "鍙兘鍒犻櫎绌洪棽鎴栧仠鐢ㄤ笖鏈璁㈠崟鍗犵敤鐨勫睍浣?");
     db.booths = db.booths.filter((item) => item.id !== boothId);
     db.obstacles = db.obstacles.filter((obstacle) => Number(obstacle.boothId) !== boothId);
@@ -2931,8 +2973,13 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
     const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
     const patch = body.patch || {};
+    if (patch.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     const positions = new Map((Array.isArray(body.positions) ? body.positions : [])
       .map((item) => [Number(item.id), item]));
+    const unauthorizedBooth = ids
+      .map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id)))
+      .find((booth) => booth && !canAccessBoothDepartment(db, user, booth));
+    if (unauthorizedBooth) return sendError(res, 403, `展位 ${unauthorizedBooth.boothNo} 不属于当前部门，不能批量修改`);
     const changed = [];
     ids.forEach((boothId) => {
       const booth = db.booths.find((item) => item.id === boothId && item.status !== "sold" && !item.locked && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
@@ -2940,6 +2987,7 @@ async function handleApi(req, res, url, body = {}) {
       ["hall", "zone", "attr", "status"].forEach((key) => {
         if (patch[key] !== undefined) booth[key] = patch[key];
       });
+      if (patch.departmentId !== undefined) booth.departmentId = Number(patch.departmentId || 0) || null;
       if (patch.area !== undefined) booth.area = Number(patch.area);
       ["x", "y"].forEach((key) => {
         if (patch[key] !== undefined) booth[key] = Number(patch[key]);
@@ -2967,6 +3015,8 @@ async function handleApi(req, res, url, body = {}) {
     if (!ids.length) return sendError(res, 400, "璇烽€夋嫨瑕佸垹闄ょ殑灞曚綅");
     const booths = ids.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id))).filter(Boolean);
     if (booths.length !== ids.length) return sendError(res, 404, "閮ㄥ垎灞曚綅涓嶅瓨鍦?");
+    const unauthorized = booths.filter((booth) => !canAccessBoothDepartment(db, user, booth));
+    if (unauthorized.length) return sendError(res, 403, `不能删除其它部门展位：${unauthorized.map((booth) => booth.boothNo).join(" / ")}`);
     const blocked = booths.filter((booth) => !canDeleteBooth(db, booth));
     if (blocked.length) {
       return sendError(res, 409, `瀛樺湪涓嶅彲鍒犻櫎灞曚綅锛?{blocked.map((booth) => booth.boothNo).join(" / ")}`);
@@ -3253,6 +3303,9 @@ async function handleApi(req, res, url, body = {}) {
     db.settings.departments = db.settings.departments.filter((item) => Number(item.id) !== departmentId);
     db.settings.departmentTargets = (db.settings.departmentTargets || []).filter((item) => Number(item.departmentId) !== departmentId);
     db.users.forEach((item) => {
+      if (Number(item.departmentId || 0) === departmentId) item.departmentId = null;
+    });
+    db.booths.forEach((item) => {
       if (Number(item.departmentId || 0) === departmentId) item.departmentId = null;
     });
     writeLog(db, user, "鍒犻櫎閮ㄩ棬", department.name, "department", department.id);
@@ -3582,6 +3635,7 @@ async function handleApi(req, res, url, body = {}) {
       const booths = boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id)));
       if (booths.some((booth) => !booth)) return sendError(res, 404, "部分展位不存在");
       if (booths.some((booth) => booth.status !== "available")) return sendError(res, 409, "所选展位已被占用");
+      if (booths.some((booth) => !canAccessBoothDepartment(db, user, booth))) return sendError(res, 403, "所选展位不属于当前部门，不能预订");
       boothSnapshot = booths.map(boothSnapshotFromBooth);
       totalAmount = boothSnapshot.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
       originalAmount = totalAmount;
@@ -3755,9 +3809,10 @@ async function handleApi(req, res, url, body = {}) {
     if (request.changeData.action === "change_booth") {
       if (order.type !== "booth") return sendError(res, 409, "鏃犲睍浣嶈鍗曚笉鑳芥洿鎹㈠睍浣?");
       if (!request.changeData.boothIds.length) return sendError(res, 400, "璇烽€夋嫨鏂扮殑灞曚綅");
-      const booths = request.changeData.boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || order.eventId) === String(order.eventId)));
+    const booths = request.changeData.boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || order.eventId) === String(order.eventId)));
       if (booths.some((booth) => !booth)) return sendError(res, 404, "鏂板睍浣嶄笉瀛樺湪");
       if (booths.some((booth) => booth.status !== "available")) return sendError(res, 409, "鏂板睍浣嶅凡琚崰鐢?");
+      if (booths.some((booth) => !canAccessBoothDepartment(db, user, booth))) return sendError(res, 403, "所选展位不属于当前部门，不能申请更换");
       request.detail = request.detail || `鏇存崲灞曚綅锛?{order.boothSnapshot.map((booth) => booth.boothNo).join(" / ")} -> ${booths.map((booth) => booth.boothNo).join(" / ")}`;
     }
     if (request.changeData.action === "cancel_order") {

@@ -72,6 +72,7 @@ const App = (() => {
     salesMapStatus: "",
     salesMapSearch: "",
     salesMapFocusId: null,
+    salesMapPanning: null,
     orderDraft: {
       type: "booth",
       salespersonId: "",
@@ -345,11 +346,11 @@ const App = (() => {
   }
 
   function mapScale() {
-    return Math.max(1, Number(byId("map-scale")?.value || state.data?.map?.scalePxPerMeter || 16));
+    return Number(Math.max(1, Number(byId("map-scale")?.value || state.data?.map?.scalePxPerMeter || 16)).toFixed(1));
   }
 
   function meterToPx(value) {
-    return Math.max(1, Math.round(Number(value || 0) * mapScale()));
+    return preciseCoord(Math.max(1, Number(value || 0) * mapScale()), 3);
   }
 
   function pxToMeter(value, digits = 2) {
@@ -362,6 +363,10 @@ const App = (() => {
 
   function fixedDecimal(value, digits = 3) {
     return Number(value || 0).toFixed(digits);
+  }
+
+  function pixelSizeText(width, height) {
+    return `${fixedDecimal(width, 3)} x ${fixedDecimal(height, 3)}`;
   }
 
   function preciseCoord(value, digits = 3) {
@@ -1173,7 +1178,9 @@ const App = (() => {
     if (!snapshot) return;
     const snapshots = Array.isArray(snapshot) ? snapshot : [snapshot];
     setTimeout(() => {
+      syncAdminMapFrameHeight();
       applyFitMapZoom();
+      syncAdminMapFrameHeight();
       snapshots.forEach((item) => {
         const box = byId(item.mapId);
         if (!box) return;
@@ -2887,8 +2894,7 @@ const App = (() => {
     return `
       <section class="section map-toolbar-section">
         <div class="toolbar">
-          ${isAdmin ? adminMapToolbar() : salesMapToolbar(selectedBooths)}
-          ${mapZoomToolbar()}
+          ${isAdmin ? adminMapToolbar() : `${salesMapToolbar(selectedBooths)}${mapZoomToolbar()}`}
         </div>
       </section>
       <div class="map-layout">
@@ -2921,12 +2927,18 @@ const App = (() => {
 
   function viewSalesBoothMap() {
     const zones = zoneList();
-    const booths = filteredSalesMapBooths();
+    const booths = state.data.booths || [];
+    const filteredBooths = filteredSalesMapBooths();
     const matchedBooths = salesMapMatchedBooths();
-    const availableCount = state.data.booths.filter((booth) => booth.status === "available").length;
-    const reservedCount = state.data.booths.filter((booth) => booth.status === "reserved").length;
-    const soldCount = state.data.booths.filter((booth) => booth.status === "sold").length;
-    const countText = state.salesMapStatus ? `${matchedBooths.length} 个匹配 / ${booths.length} 个显示` : `${booths.length} / ${state.data.booths.length} 个展位`;
+    const totalBoothCount = boothEquivalentCount(booths);
+    const filteredBoothCount = boothEquivalentCount(filteredBooths);
+    const matchedBoothCount = boothEquivalentCount(matchedBooths);
+    const availableCount = boothEquivalentCount(booths.filter((booth) => booth.status === "available"));
+    const reservedCount = boothEquivalentCount(booths.filter((booth) => booth.status === "reserved"));
+    const soldCount = boothEquivalentCount(booths.filter((booth) => booth.status === "sold"));
+    const countText = state.salesMapStatus
+      ? `${formatCount(matchedBoothCount)} 个匹配 / ${formatCount(filteredBoothCount)} 个显示`
+      : `${formatCount(filteredBoothCount)} / ${formatCount(totalBoothCount)} 个展位`;
     return `
       <section class="section">
         <div class="section-title-row">
@@ -2934,9 +2946,9 @@ const App = (() => {
           <span class="count-pill">${countText}</span>
         </div>
         <div class="sales-map-summary">
-          <div><strong>${availableCount}</strong><span>可选展位</span></div>
-          <div><strong>${reservedCount}</strong><span>已预留</span></div>
-          <div><strong>${soldCount}</strong><span>首款成交</span></div>
+          <div><strong>${formatCount(availableCount)}</strong><span>可选展位</span></div>
+          <div><strong>${formatCount(reservedCount)}</strong><span>已预留</span></div>
+          <div><strong>${formatCount(soldCount)}</strong><span>首款成交</span></div>
         </div>
         <div class="toolbar sales-map-toolbar">
           <label>展区<select onchange="App.setSalesMapFilter('zone', this.value)">
@@ -2962,7 +2974,9 @@ const App = (() => {
         </div>
       </section>
       <section id="sales-map-frame" class="map-frame sales-map-frame">
-        ${salesBoothMapSvg(booths)}
+        <div class="sales-map-pan-surface" onmousedown="App.salesMapPanDown(event)" onmousemove="App.salesMapPanMove(event)" onmouseup="App.salesMapPanUp(event)" onmouseleave="App.salesMapPanUp(event)" onwheel="App.blockSalesMapWheel(event)">
+          ${salesBoothMapSvg(booths)}
+        </div>
       </section>
       <section class="section">
         <h2>展区颜色</h2>
@@ -2987,6 +3001,8 @@ const App = (() => {
   }
 
   function salesMapBoothDimmed(booth) {
+    if (state.salesMapZone && booth.zone !== state.salesMapZone) return true;
+    if (state.salesMapAttr && booth.attr !== state.salesMapAttr) return true;
     if (state.salesMapStatus && booth.status !== state.salesMapStatus) return true;
     if (state.salesMapOnlyAvailable && booth.status !== "available") return true;
     return false;
@@ -3031,7 +3047,7 @@ const App = (() => {
       const textVisible = area.width >= 36 && area.height >= 20;
       const title = [
         `活动区：${area.name || "活动区"}`,
-        `尺寸：${Math.round(area.width)} x ${Math.round(area.height)} 像素`
+        `尺寸：${pixelSizeText(area.width, area.height)} 像素`
       ].join("\n");
       return `
         <g data-activity-area-id="${area.id}" class="activity-area-group ${interactive ? "" : "readonly"}" ${interactive ? `onclick="App.activityAreaClick(event, ${area.id})"` : ""}>
@@ -3125,7 +3141,7 @@ const App = (() => {
       <label>底图上传<input id="bg-file" type="file" accept="image/*,application/pdf"></label>
       <button onclick="App.uploadBackground()">上传底图</button>
       <button class="secondary" onclick="App.fitBackgroundToImage()">按原图比例校正</button>
-      <label>比例尺 像素/米<input id="map-scale" type="number" value="${mapScale()}" min="1"></label>
+      <label>比例尺 像素/米<input id="map-scale" type="number" value="${fixedDecimal(mapScale(), 1)}" min="1" step="0.1"></label>
       <button class="secondary" onclick="App.saveMapScale()">保存比例尺</button>
       <button class="${state.drawMode ? "success" : "secondary"}" onclick="App.toggleDraw()">${state.drawMode ? "绘制模式中" : "开启绘制"}</button>
       <button class="${state.activityAreaMode ? "success" : "secondary"}" onclick="App.toggleActivityAreaMode()">${state.activityAreaMode ? "活动区绘制中" : "绘制活动区"}</button>
@@ -3138,7 +3154,49 @@ const App = (() => {
       </select></label>
       <button class="${state.obstacleMode === "internal" ? "success" : "secondary"}" onclick="App.toggleObstacleMode('internal')">展位内障碍物</button>
       <button class="${state.obstacleMode === "external" ? "success" : "secondary"}" onclick="App.toggleObstacleMode('external')">展位外障碍物</button>
-      <button class="danger" onclick="App.clearAllBooths()">清空展位图</button>
+      ${batchBoothToolbar()}
+    `;
+  }
+
+  function batchBoothToolbar() {
+    const selectedIds = [...state.selectedBoothIds];
+    const selectedBooths = selectedIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
+    const selectedBooth = state.data.booths.find((item) => item.id === state.selectedBoothId) || null;
+    const baseBooth = selectedBooths.find((item) => item.id === state.selectedBoothId) || selectedBooths[0] || selectedBooth || null;
+    const canAssignBoothDepartment = isSuperAdminRole(state.data.me.role);
+    const batchHalls = [
+      `<option value="" ${baseBooth?.hall ? "" : "selected"}>不修改</option>`,
+      ...hallList().map((hall) => `<option value="${h(hall)}" ${baseBooth?.hall === hall ? "selected" : ""}>${h(hall)}</option>`)
+    ].join("");
+    const batchZones = [
+      `<option value="" ${baseBooth?.zone ? "" : "selected"}>不修改</option>`,
+      ...zoneList().map((zone) => `<option value="${h(zone.name)}" ${baseBooth?.zone === zone.name ? "selected" : ""}>${h(zone.name)}</option>`)
+    ].join("");
+    const batchAttrs = [
+      `<option value="" ${baseBooth?.attr ? "" : "selected"}>不修改</option>`,
+      `<option value="standard" ${baseBooth?.attr === "standard" ? "selected" : ""}>标摊</option>`,
+      `<option value="raw" ${baseBooth?.attr === "raw" ? "selected" : ""}>光地</option>`
+    ].join("");
+    const batchDepartments = canAssignBoothDepartment ? [
+      `<option value="__nochange" selected>不修改</option>`,
+      `<option value="">未分配</option>`,
+      ...departmentList().map((department) => `<option value="${department.id}">${h(department.name)}</option>`)
+    ].join("") : "";
+    return `
+      <div class="toolbar-break"></div>
+      <div class="batch-toolbar">
+        <label>批量展馆<select id="batch-hall">${batchHalls}</select></label>
+        <label>批量展区<select id="batch-zone">${batchZones}</select></label>
+        <label>批量属性<select id="batch-attr">${batchAttrs}</select></label>
+        ${canAssignBoothDepartment ? `<label>批量部门<select id="batch-department">${batchDepartments}</select></label>` : ""}
+        <label>批量状态<select id="batch-status"><option value="">不修改状态</option><option value="available">空闲</option><option value="disabled">停用</option></select></label>
+        <button class="secondary" onclick="App.batchUpdateBooths()">批量更新</button>
+        <button class="${state.batchDragMode ? "success" : "secondary"}" onclick="App.toggleBatchDragMode()">${state.batchDragMode ? "批量拖动中" : "批量拖动"}</button>
+        <button class="secondary" onclick="App.copySelectedBooths()">批量复制</button>
+        <button class="secondary" onclick="App.clearBoothSelection()">清空批量</button>
+        ${mapZoomToolbar()}
+        <button class="danger clear-map-button" onclick="App.clearAllBooths()">清空展位图</button>
+      </div>
     `;
   }
 
@@ -3169,7 +3227,7 @@ const App = (() => {
         <div class="draw-preset-panel collapsed">
           <button class="draw-preset-toggle" onclick="App.toggleDrawPresetPanel()">绘制设置</button>
           <span>${h(presetHall)} · ${h(presetZone)}</span>
-          <span id="draw-preset-pixels">${meterToPx(state.drawPresetWidthM)} x ${meterToPx(state.drawPresetDepthM)} 像素</span>
+          <span id="draw-preset-pixels">${pixelSizeText(meterToPx(state.drawPresetWidthM), meterToPx(state.drawPresetDepthM))} 像素</span>
           <span id="draw-preset-next">下一个：${h(nextBoothNo())}</span>
         </div>
       `;
@@ -3192,7 +3250,7 @@ const App = (() => {
           <option value="yes" ${state.drawBoothNoSkipEnabled === "yes" ? "selected" : ""}>是</option>
         </select></label>
         ${state.drawBoothNoSkipEnabled === "yes" ? `<label>跳号数字<input id="draw-booth-step" type="number" min="1" value="${h(state.drawBoothNoStep)}" oninput="App.updateDrawPreset()"></label>` : ""}
-        <span id="draw-preset-pixels">${meterToPx(state.drawPresetWidthM)} x ${meterToPx(state.drawPresetDepthM)} 像素</span>
+        <span id="draw-preset-pixels">${pixelSizeText(meterToPx(state.drawPresetWidthM), meterToPx(state.drawPresetDepthM))} 像素</span>
         <span id="draw-preset-next">下一个：${h(nextBoothNo())}</span>
         <div class="draw-preset-actions">
           <button class="tiny secondary" onclick="App.resetDrawBoothNumber()">重置编号</button>
@@ -3237,6 +3295,8 @@ const App = (() => {
     const zones = zoneList().map((zone) => `<option value="${h(zone.name)}" ${booth?.zone === zone.name ? "selected" : ""}>${h(zone.name)}</option>`).join("");
     const selectedBooths = selectedIds.map((id) => state.data.booths.find((item) => item.id === id)).filter(Boolean);
     const baseBooth = selectedBooths.find((item) => item.id === state.selectedBoothId) || selectedBooths[0] || null;
+    const canAssignBoothDepartment = isSuperAdminRole(state.data.me.role);
+    const boothDepartmentOptions = canAssignBoothDepartment ? departmentOptions(booth?.departmentId || "") : "";
     const obstacleArea = booth ? boothObstacleAreaFor(booth) : 0;
     const billableArea = booth ? boothBillableAreaFor(booth) : 0;
     const boothPrice = booth ? boothPriceFor(booth) : 0;
@@ -3248,6 +3308,7 @@ const App = (() => {
           <label>所在展馆<select id="booth-hall">${halls}</select></label>
           <label>展区<select id="booth-zone">${zones}</select></label>
           <label>属性<select id="booth-attr"><option value="standard" ${booth.attr === "standard" ? "selected" : ""}>标摊</option><option value="raw" ${booth.attr === "raw" ? "selected" : ""}>光地</option></select></label>
+          ${canAssignBoothDepartment ? `<label>分配部门<select id="booth-department">${boothDepartmentOptions}</select></label>` : ""}
           <label>状态<select id="booth-status">
             ${["available", "reserved", "disabled"].map((status) => `<option value="${status}" ${booth.status === status ? "selected" : ""}>${statusText(status)}</option>`).join("")}
           </select></label>
@@ -3257,7 +3318,7 @@ const App = (() => {
           <label>障碍面积㎡<input id="booth-obstacle-area" value="${fixedDecimal(obstacleArea, 3)}" disabled></label>
           <label>计价面积㎡<input id="booth-billable-area" value="${fixedDecimal(billableArea, 3)}" disabled></label>
           <label>展位价格<input id="booth-price" value="${money(boothPrice)}" disabled></label>
-          <label>图上像素<input id="booth-pixel-size" value="${Math.round(booth.width)} x ${Math.round(booth.height)}" disabled></label>
+          <label>图上像素<input id="booth-pixel-size" value="${pixelSizeText(booth.width, booth.height)}" disabled></label>
         </div>
         <div class="split-actions" style="margin-top:12px">
           <button onclick="App.saveBooth()">保存展位</button>
@@ -3267,15 +3328,7 @@ const App = (() => {
         </div>
       ` : `<div class="empty">点击一个展位进行编辑，或开启绘制模式拖拽创建。</div>`}
       ${selectedHint}
-      <div class="grid four">
-        <label>批量展馆<select id="batch-hall">${hallList().map((hall) => `<option value="${h(hall)}">${h(hall)}</option>`).join("")}</select></label>
-        <label>批量展区<select id="batch-zone">${zoneList().map((zone) => `<option value="${h(zone.name)}">${h(zone.name)}</option>`).join("")}</select></label>
-        <label>批量属性<select id="batch-attr"><option value="standard">标摊</option><option value="raw">光地</option></select></label>
-        <label>批量状态<select id="batch-status"><option value="">不修改状态</option><option value="available">空闲</option><option value="disabled">停用</option></select></label>
-      </div>
       <div class="split-actions">
-        <button class="secondary" onclick="App.batchUpdateBooths()">批量更新</button>
-        <button class="${state.batchDragMode ? "success" : "secondary"}" onclick="App.toggleBatchDragMode()">${state.batchDragMode ? "批量拖动中" : "批量拖动"}</button>
         <span class="axis-align-control">
           <label>沿 X 轴<select id="booth-align-x-mode">
             <option value="align:start">上对齐</option>
@@ -3294,9 +3347,7 @@ const App = (() => {
           </select></label>
           <button class="secondary" onclick="App.applyBoothAlignment('y')">执行</button>
         </span>
-        <button class="secondary" onclick="App.copySelectedBooths()">批量复制</button>
         <button class="danger" onclick="App.deleteSelectedBooths()">删除选中展位</button>
-        <button class="secondary" onclick="App.clearBoothSelection()">清空批量</button>
       </div>
     `;
   }
@@ -3328,7 +3379,7 @@ const App = (() => {
       <div class="compact-list">
         <div class="compact-item">
           <strong>${obstacle.type === "internal" ? "展位内障碍物" : "展位外障碍物"}</strong>
-          <div class="hint">${booth ? `绑定展位 ${h(booth.boothNo)} · ` : ""}${obstacleShapeText(shape)} · ${obstacleAreaText(obstacle)} · ${Math.round(obstacle.width)} x ${Math.round(obstacle.height)} 像素</div>
+          <div class="hint">${booth ? `绑定展位 ${h(booth.boothNo)} · ` : ""}${obstacleShapeText(shape)} · ${obstacleAreaText(obstacle)} · ${pixelSizeText(obstacle.width, obstacle.height)} 像素</div>
         </div>
       </div>
       <div class="grid two" style="margin-top:12px">
@@ -3339,7 +3390,7 @@ const App = (() => {
         <label>障碍物长m<input id="obstacle-width-m" type="number" step="0.001" value="${fixedDecimal(widthM, 3)}" oninput="App.previewObstacleSize()"></label>
         <label>障碍物宽m<input id="obstacle-depth-m" type="number" step="0.001" value="${fixedDecimal(depthM, 3)}" oninput="App.previewObstacleSize()"></label>
         <label>面积㎡<input id="obstacle-area" type="number" value="${fixedDecimal(area, 3)}" readonly></label>
-        <label>图上像素<input id="obstacle-pixel-size" value="${Math.round(obstacle.width)} x ${Math.round(obstacle.height)}" disabled></label>
+        <label>图上像素<input id="obstacle-pixel-size" value="${pixelSizeText(obstacle.width, obstacle.height)}" disabled></label>
       </div>
       <div class="split-actions" style="margin-top:12px">
         <button onclick="App.saveObstacle()">保存障碍物尺寸</button>
@@ -3369,14 +3420,14 @@ const App = (() => {
       <div class="compact-list">
         <div class="compact-item">
           <strong>${h(area.name || "活动区")}</strong>
-          <div class="hint">${fixedDecimal(widthM, 3)}m x ${fixedDecimal(depthM, 3)}m · ${Math.round(area.width)} x ${Math.round(area.height)} 像素</div>
+          <div class="hint">${fixedDecimal(widthM, 3)}m x ${fixedDecimal(depthM, 3)}m · ${pixelSizeText(area.width, area.height)} 像素</div>
         </div>
       </div>
       <div class="grid two" style="margin-top:12px">
         <label>活动区名称<input id="activity-area-name" value="${h(area.name || "活动区")}"></label>
         <label>活动区长m<input id="activity-area-width-m" type="number" step="0.001" value="${fixedDecimal(widthM, 3)}" oninput="App.previewActivityAreaSize()"></label>
         <label>活动区宽m<input id="activity-area-depth-m" type="number" step="0.001" value="${fixedDecimal(depthM, 3)}" oninput="App.previewActivityAreaSize()"></label>
-        <label>图上像素<input id="activity-area-pixel-size" value="${Math.round(area.width)} x ${Math.round(area.height)}" disabled></label>
+        <label>图上像素<input id="activity-area-pixel-size" value="${pixelSizeText(area.width, area.height)}" disabled></label>
       </div>
       <div class="split-actions" style="margin-top:12px">
         <button onclick="App.saveActivityArea()">保存活动区</button>
@@ -3414,6 +3465,7 @@ const App = (() => {
     const mode = customerTargetMode();
     const salesTarget = (userId) => salesTargets.find((item) => Number(item.userId) === Number(userId)) || {};
     const departmentTarget = (departmentId) => departmentTargets.find((item) => Number(item.departmentId) === Number(departmentId)) || {};
+    const canEditAdminContactMask = isSuperAdminRole(state.data.me.role);
     const deadlineDayMode = rules.deadlineDayMode === "natural" ? "natural" : "workday";
     const deadlineDayModeText = deadlineDayMode === "natural" ? "自然日" : "工作日";
     return `
@@ -3434,10 +3486,10 @@ const App = (() => {
           <label>释放前提醒天数<input id="rule-notice" type="number" value="${rules.noticeDaysBeforeRelease}"></label>
           <label>新客户保护天数<input id="rule-new-customer-days" type="number" value="${rules.newCustomerProtectDays ?? 30}"></label>
           <label>老客户保护天数<input id="rule-old-customer-days" type="number" value="${rules.oldCustomerProtectDays ?? 30}"></label>
-          <label>管理员联系方式脱敏<select id="rule-admin-contact-mask-mode" onchange="App.salesFlowRuleChanged()">
+          ${canEditAdminContactMask ? `<label>管理员联系方式脱敏<select id="rule-admin-contact-mask-mode" onchange="App.salesFlowRuleChanged()">
             <option value="off" ${(rules.adminContactMaskMode || "off") !== "department" ? "selected" : ""}>关闭：管理员可查看全部联系方式</option>
             <option value="department" ${rules.adminContactMaskMode === "department" ? "selected" : ""}>开启：管理员仅查看本部门联系方式</option>
-          </select></label>
+          </select></label>` : ""}
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>销售流程<select id="rule-sales-flow" onchange="App.salesFlowRuleChanged()">
@@ -4595,6 +4647,16 @@ const App = (() => {
     clearTextSelection();
   }
 
+  function syncAdminMapFrameHeight() {
+    const box = byId("admin-map-frame");
+    const sidePanel = document.querySelector(".map-layout .side-panel");
+    if (!box || !sidePanel) return;
+    const sideHeight = Math.ceil(sidePanel.getBoundingClientRect().height);
+    const svgHeight = Math.ceil(box.querySelector(".booth-svg")?.getBoundingClientRect().height || 0);
+    const targetHeight = Math.max(260, Math.min(sideHeight || 0, svgHeight || sideHeight || 0) || sideHeight || 440);
+    box.style.height = `${targetHeight}px`;
+  }
+
   function hasMapPointerInteraction() {
     return Boolean(
       state.dragging
@@ -4925,7 +4987,9 @@ const App = (() => {
   function scheduleFitMapZoom() {
     if (state.mapZoom !== "fit") return;
     setTimeout(() => {
+      syncAdminMapFrameHeight();
       applyFitMapZoom();
+      syncAdminMapFrameHeight();
       updateDrawPresetPosition();
     }, 0);
   }
@@ -5662,7 +5726,7 @@ const App = (() => {
       setTimeout(() => scrollModalMapToBooth("sales-map-frame", booth), 0);
     },
     async exportSalesMap() {
-      const booths = filteredSalesMapBooths();
+      const booths = state.data.booths || [];
       try {
         state.error = "";
         state.message = "";
@@ -5764,7 +5828,7 @@ const App = (() => {
       if (previousNumberConfig !== nextNumberConfig) state.drawBoothNoResetActive = false;
       const pixels = byId("draw-preset-pixels");
       const next = byId("draw-preset-next");
-      if (pixels) pixels.textContent = `${meterToPx(state.drawPresetWidthM)} x ${meterToPx(state.drawPresetDepthM)} 像素`;
+      if (pixels) pixels.textContent = `${pixelSizeText(meterToPx(state.drawPresetWidthM), meterToPx(state.drawPresetDepthM))} 像素`;
       if (next) next.textContent = `下一个：${nextBoothNo()}`;
       updateDrawPresetPosition();
       if (previousSkipEnabled !== state.drawBoothNoSkipEnabled) render();
@@ -5788,6 +5852,42 @@ const App = (() => {
     fitMapToViewport() {
       scheduleFitMapZoom();
     },
+    syncAdminMapFrameHeight,
+    salesMapPanDown(event) {
+      if (event.button !== 0) return;
+      const box = byId("sales-map-frame");
+      if (!box) return;
+      event.preventDefault();
+      state.salesMapPanning = {
+        startX: event.clientX,
+        startY: event.clientY,
+        scrollLeft: box.scrollLeft,
+        scrollTop: box.scrollTop
+      };
+      document.body.classList.add("map-interacting");
+      box.classList.add("is-panning");
+      clearTextSelection();
+    },
+    salesMapPanMove(event) {
+      if (!state.salesMapPanning) return;
+      const box = byId("sales-map-frame");
+      if (!box) return;
+      event.preventDefault();
+      box.scrollLeft = state.salesMapPanning.scrollLeft - (event.clientX - state.salesMapPanning.startX);
+      box.scrollTop = state.salesMapPanning.scrollTop - (event.clientY - state.salesMapPanning.startY);
+      clearTextSelection();
+    },
+    salesMapPanUp(event) {
+      if (!state.salesMapPanning) return;
+      event?.preventDefault?.();
+      state.salesMapPanning = null;
+      document.body.classList.remove("map-interacting");
+      byId("sales-map-frame")?.classList.remove("is-panning");
+      clearTextSelection();
+    },
+    blockSalesMapWheel(event) {
+      event.preventDefault();
+    },
     async undoMapEdit() {
       const snapshot = state.mapUndoStack.pop();
       if (!snapshot) return;
@@ -5803,10 +5903,11 @@ const App = (() => {
       await restoreMapSnapshot(snapshot, "展位图已重做");
     },
     async saveMapScale() {
+      const scale = Number(Math.max(1, Number(byId("map-scale").value || 16)).toFixed(1));
       rememberMapState();
       await run(() => api("/api/map/settings", {
         method: "PUT",
-        body: { scalePxPerMeter: Number(byId("map-scale").value || 16), resizeBoothsByScale: true }
+        body: { scalePxPerMeter: scale, resizeBoothsByScale: true }
       }), "比例尺已保存");
     },
     toggleDraw() {
@@ -6434,7 +6535,7 @@ const App = (() => {
       const shapeElement = document.querySelector(`g[data-activity-area-id="${area.id}"] rect`);
       const text = document.querySelector(`g[data-activity-area-id="${area.id}"] text`);
       const pixelInput = byId("activity-area-pixel-size");
-      if (pixelInput) pixelInput.value = `${Math.round(width)} x ${Math.round(height)}`;
+      if (pixelInput) pixelInput.value = pixelSizeText(width, height);
       if (shapeElement) {
         shapeElement.setAttribute("x", rect.x);
         shapeElement.setAttribute("y", rect.y);
@@ -6470,7 +6571,7 @@ const App = (() => {
       const pixelInput = byId("obstacle-pixel-size");
       const area = obstacleAreaFromSize(widthM, depthM, shape);
       if (areaInput) areaInput.value = fixedDecimal(area, 3);
-      if (pixelInput) pixelInput.value = `${width} x ${height} / ${obstacleShapeText(shape)}${next.fits ? "" : " / 超出展位"}`;
+      if (pixelInput) pixelInput.value = `${pixelSizeText(width, height)} / ${obstacleShapeText(shape)}${next.fits ? "" : " / 超出展位"}`;
       setShapeGeometry(shapeElement, next.rect, shape);
       if (text) {
         text.setAttribute("x", next.rect.x + next.rect.width / 2);
@@ -6874,6 +6975,7 @@ const App = (() => {
           hall: byId("booth-hall").value,
           zone: byId("booth-zone").value,
           attr: byId("booth-attr").value,
+          ...(byId("booth-department") ? { departmentId: Number(byId("booth-department").value || 0) || null } : {}),
           status: byId("booth-status").value,
           area: Number((widthM * depthM).toFixed(2)),
           widthM: widthM || booth.widthM,
@@ -6901,7 +7003,7 @@ const App = (() => {
       const areaInput = byId("booth-area");
       const pixelInput = byId("booth-pixel-size");
       if (areaInput) areaInput.value = Number((widthM * depthM).toFixed(2));
-      if (pixelInput) pixelInput.value = `${width} x ${height}`;
+      if (pixelInput) pixelInput.value = pixelSizeText(width, height);
       if (rect) {
         rect.setAttribute("width", width);
         rect.setAttribute("height", height);
@@ -6924,9 +7026,22 @@ const App = (() => {
         render();
         return;
       }
-      const patch = { hall: byId("batch-hall").value, zone: byId("batch-zone").value, attr: byId("batch-attr").value };
+      const patch = {};
+      const hall = byId("batch-hall").value;
+      const zone = byId("batch-zone").value;
+      const attr = byId("batch-attr").value;
+      const departmentId = byId("batch-department")?.value ?? "__nochange";
+      if (hall) patch.hall = hall;
+      if (zone) patch.zone = zone;
+      if (attr) patch.attr = attr;
+      if (departmentId !== "__nochange") patch.departmentId = Number(departmentId || 0) || null;
       const status = byId("batch-status").value;
       if (status) patch.status = status;
+      if (!Object.keys(patch).length) {
+        state.error = "请选择至少一个要批量修改的属性";
+        render();
+        return;
+      }
       rememberMapState();
       await run(() => api("/api/booths/batch", {
         method: "POST",
@@ -7383,7 +7498,7 @@ const App = (() => {
             noticeDaysBeforeRelease: Number(byId("rule-notice").value || 0),
             newCustomerProtectDays: Number(byId("rule-new-customer-days").value || 0),
             oldCustomerProtectDays: Number(byId("rule-old-customer-days").value || 0),
-            adminContactMaskMode: byId("rule-admin-contact-mask-mode")?.value || "off",
+            ...(byId("rule-admin-contact-mask-mode") ? { adminContactMaskMode: byId("rule-admin-contact-mask-mode").value || "off" } : {}),
             contractApprovedVoucherWorkdays: Number(byId("rule-contract-voucher-workdays")?.value ?? state.data.settings.rules.contractApprovedVoucherWorkdays ?? state.data.settings.rules.reserveWorkdays ?? 7),
             salesFlowMode: byId("rule-sales-flow")?.value || "voucher_direct",
             customerTargetMode: byId("rule-customer-target-mode")?.value || "sales",
@@ -7407,7 +7522,7 @@ const App = (() => {
       rules.noticeDaysBeforeRelease = Number(byId("rule-notice")?.value ?? rules.noticeDaysBeforeRelease ?? 0);
       rules.newCustomerProtectDays = Number(byId("rule-new-customer-days")?.value ?? rules.newCustomerProtectDays ?? 30);
       rules.oldCustomerProtectDays = Number(byId("rule-old-customer-days")?.value ?? rules.oldCustomerProtectDays ?? 30);
-      rules.adminContactMaskMode = byId("rule-admin-contact-mask-mode")?.value || rules.adminContactMaskMode || "off";
+      if (byId("rule-admin-contact-mask-mode")) rules.adminContactMaskMode = byId("rule-admin-contact-mask-mode").value || rules.adminContactMaskMode || "off";
       rules.contractApprovedVoucherWorkdays = Number(byId("rule-contract-voucher-workdays")?.value ?? rules.contractApprovedVoucherWorkdays ?? rules.reserveWorkdays ?? 7);
       rules.salesFlowMode = byId("rule-sales-flow")?.value || "voucher_direct";
       rules.customerTargetMode = byId("rule-customer-target-mode")?.value || rules.customerTargetMode || "sales";
