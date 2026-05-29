@@ -357,10 +357,6 @@ const App = (() => {
     return Number((Number(value || 0) / mapScale()).toFixed(digits));
   }
 
-  function formatDecimal(value, digits = 3) {
-    return Number(value || 0).toFixed(digits).replace(/\.?0+$/, "");
-  }
-
   function fixedDecimal(value, digits = 3) {
     return Number(value || 0).toFixed(digits);
   }
@@ -1216,7 +1212,8 @@ const App = (() => {
   }
 
   function looksMojibake(value) {
-    return /[�]|[璇鏃浼瀹鎵鍙鍚绋閮灞闄妯鍥鐢璐鍒姘椤缂绾]/.test(String(value || ""));
+    const text = String(value || "");
+    return text.includes("\ufffd") || /[\u7487\u93c3\u6d7c\u7039\u93b5\u934f\u935a\u7a0b\u95ae\u705e\u95c4\u59af\u934d\u9422\u8d10\u934a\u59d8\u6924\u6924\u7f02\u7efe]/.test(text);
   }
 
   function cleanErrorMessage(message, status = 0) {
@@ -1841,7 +1838,7 @@ const App = (() => {
         </div>
         <div class="todo-grid">
           ${items.map((item) => `
-            <button type="button" class="todo-card ${h(item.tone)}" onclick="App.openTodoTarget('${h(item.key)}')">
+            <button type="button" class="todo-card ${Number(item.count || 0) ? h(item.tone) : ""}" onclick="App.openTodoTarget('${h(item.key)}')">
               <span>${h(item.title)}</span>
               <strong>${formatCount(item.count)}</strong>
               <small>${Number(item.count || 0) ? "点击处理" : "暂无待办"}</small>
@@ -2231,13 +2228,6 @@ const App = (() => {
         </div>`}
       </section>
     `;
-  }
-
-  function eventRoleFor(eventId, userId) {
-    return (state.data.eventRoles || []).find((row) => (
-      String(row.eventId) === String(eventId)
-      && Number(row.userId) === Number(userId)
-    ))?.role || "";
   }
 
   function eventRoleIds(eventId, role) {
@@ -2757,26 +2747,6 @@ const App = (() => {
         </div>
       </section>
     `;
-  }
-
-  function linkedOldCustomerOrders() {
-    const event = state.data.settings.event || {};
-    const linkedEventId = event.linkedEventId || "";
-    if (!linkedEventId) return [];
-    const currentNames = new Set(state.data.orders
-      .filter((order) => order.eventId === event.id && isActiveOrder(order))
-      .map((order) => companyNameKey(getCompany(order.companyId).name))
-      .filter(Boolean));
-    const seen = new Set();
-    return state.data.orders
-      .filter((order) => order.status === "sold" && order.eventId === linkedEventId)
-      .filter((order) => isAdminLikeRole(state.data.me.role) || order.salespersonId === state.data.me.id)
-      .filter((order) => {
-        const key = companyNameKey(getCompany(order.companyId).name);
-        if (!key || currentNames.has(key) || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
   }
 
   function viewOldCustomers() {
@@ -3925,12 +3895,6 @@ const App = (() => {
     return "当前订单暂不能上传水单";
   }
 
-  function paymentSummary(orderId) {
-    const payments = state.data.payments.filter((item) => item.orderId === orderId);
-    if (!payments.length) return "暂无水单";
-    return payments.map((item) => `${money(item.amount)} ${statusText(item.status)}`).join(" / ");
-  }
-
   function pendingChangeSummary(orderId) {
     const changes = state.data.changeRequests.filter((item) => item.orderId === orderId && item.status === "pending");
     if (!changes.length) return "";
@@ -4705,14 +4669,6 @@ const App = (() => {
     const right = left + Number(booth.width || 0);
     const bottom = top + Number(booth.height || 0);
     return rect.x >= left && rect.y >= top && rect.x + rect.width <= right && rect.y + rect.height <= bottom;
-  }
-
-  function boothCenterX(booth) {
-    return Number(booth.x || 0) + Number(booth.width || 0) / 2;
-  }
-
-  function boothCenterY(booth) {
-    return Number(booth.y || 0) + Number(booth.height || 0) / 2;
   }
 
   function boothLeft(booth) {
