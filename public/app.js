@@ -677,7 +677,7 @@ const App = (() => {
       <div class="company-edit-form">
         <div class="grid two">
           <label>${requiredLabel("企业名称")}<input id="edit-company-name" value="${h(company.name || "")}" ${identityReadonly} required></label>
-          <label>企业简称<input id="edit-company-short-name" value="${h(company.shortName || "")}" ${identityReadonly}></label>
+          <label>${requiredLabel("企业简称")}<input id="edit-company-short-name" value="${h(company.shortName || "")}" ${identityReadonly} required></label>
           <label>联系人<input id="edit-company-contact" value="${h(company.contactName || "")}" placeholder="${company.contactMasked ? "联系方式已脱敏" : ""}"></label>
           <label>手机<input id="edit-company-phone" value="${h(company.phone || "")}" placeholder="${company.contactMasked ? "联系方式已脱敏" : ""}"></label>
           <label>邮箱<input id="edit-company-email" value="${h(company.email || "")}"></label>
@@ -1837,13 +1837,17 @@ const App = (() => {
           <span class="count-pill">${items.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项待办</span>
         </div>
         <div class="todo-grid">
-          ${items.map((item) => `
-            <button type="button" class="todo-card ${Number(item.count || 0) ? h(item.tone) : ""}" onclick="App.openTodoTarget('${h(item.key)}')">
+          ${items.map((item) => {
+            const count = Number(item.count || 0);
+            const toneClass = count > 0 && item.tone !== "normal" ? `todo-${item.tone}` : "";
+            return `
+            <button type="button" class="todo-card ${h(toneClass)}" onclick="App.openTodoTarget('${h(item.key)}')">
               <span>${h(item.title)}</span>
-              <strong>${formatCount(item.count)}</strong>
-              <small>${Number(item.count || 0) ? "点击处理" : "暂无待办"}</small>
+              <strong>${formatCount(count)}</strong>
+              <small>${count > 0 ? "点击处理" : "暂无待办"}</small>
             </button>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       </section>
     `;
@@ -2659,7 +2663,7 @@ const App = (() => {
           </header>
           <div class="grid two">
             <label>${requiredLabel("企业名称")}<input id="cust-name" value="${h(draft.name)}" ${similarityInput} required></label>
-            <label>企业简称<input id="cust-short-name" value="${h(draft.shortName || "")}" ${similarityInput}></label>
+            <label>${requiredLabel("企业简称")}<input id="cust-short-name" value="${h(draft.shortName || "")}" ${similarityInput} required></label>
             <label>联系人<input id="cust-contact" value="${h(draft.contactName)}" ${similarityInput}></label>
             <label>手机号<input id="cust-phone" value="${h(draft.phone)}" ${similarityInput}></label>
             <label>邮箱<input id="cust-email" value="${h(draft.email)}"></label>
@@ -2996,7 +3000,7 @@ const App = (() => {
         <g data-booth-id="${booth.id}" class="sales-booth-group">
           <title>${h(salesBoothTooltip(booth))}</title>
           <rect class="sales-booth-rect ${available ? "available" : "unavailable"} ${focused ? "focused" : ""}" fill="${h(fill)}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(boothMapLabel(booth))}</text>` : ""}
+          ${textVisible ? boothMapLabelSvg(booth) : ""}
         </g>
       `;
     }).join("");
@@ -3099,11 +3103,24 @@ const App = (() => {
       && Number(order?.paidApprovedAmount || 0) >= Number(order.depositRequired || 0);
   }
 
-  function boothMapLabel(booth) {
+  function boothMapLabelLines(booth) {
     const order = activeOrderForBooth(booth);
-    if (!orderDepositMet(order)) return booth.boothNo;
+    if (!order || order.status !== "sold") return [booth.boothNo];
     const company = getCompany(order.companyId);
-    return company.shortName || company.name || booth.boothNo;
+    return [booth.boothNo, company.shortName || company.name || ""].filter(Boolean);
+  }
+
+  function boothMapLabelSvg(booth) {
+    const x = Number(booth.x || 0) + Number(booth.width || 0) / 2;
+    const y = Number(booth.y || 0) + Number(booth.height || 0) / 2;
+    const lines = boothMapLabelLines(booth);
+    if (lines.length <= 1) return `<text class="booth-text" x="${x}" y="${y}">${h(lines[0] || "")}</text>`;
+    return `
+      <text class="booth-text booth-text-multiline" x="${x}" y="${y}">
+        <tspan x="${x}" dy="-0.55em">${h(lines[0])}</tspan>
+        <tspan x="${x}" dy="1.15em">${h(lines[1])}</tspan>
+      </text>
+    `;
   }
 
   function adminMapToolbar() {
@@ -3241,7 +3258,7 @@ const App = (() => {
       return `
         <g data-booth-id="${booth.id}" onclick="App.boothClick(event, ${booth.id})">
           <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${base ? "base" : ""} ${booth.locked ? "locked" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(boothMapLabel(booth))}</text>` : ""}
+          ${textVisible ? boothMapLabelSvg(booth) : ""}
           ${booth.locked ? `<text class="booth-lock-text" x="${booth.x + Number(booth.width || 0) - 8}" y="${booth.y + 12}">锁</text>` : ""}
         </g>
       `;
@@ -4291,7 +4308,7 @@ const App = (() => {
 
   function viewExhibitorList() {
     const allRows = state.data.orders
-      .filter((order) => order.type === "booth" && isActiveOrder(order))
+      .filter((order) => isActiveOrder(order))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const rows = filterOrdersByDrill(allRows, state.exhibitorFilter);
     const filterLabel = exhibitorFilterLabel(state.exhibitorFilter);
@@ -4307,20 +4324,23 @@ const App = (() => {
         ${exhibitorAdvancedFilterBar(state.exhibitorFilter, rows.length)}
         <div class="table-wrap">
           <table>
-            <thead><tr><th>企业名称</th><th>企业简称</th><th>展位</th><th>面积</th><th>业务员</th><th>已收款</th><th>预留展位倒计时</th><th>展务资料</th><th>操作</th></tr></thead>
+            <thead><tr><th>企业名称</th><th>企业简称</th><th>展位</th><th>面积</th><th>订单状态</th><th>业务员</th><th>已收款</th><th>预留展位倒计时</th><th>展务资料</th><th>操作</th></tr></thead>
             <tbody>
               ${rows.map((order) => {
                 const company = getCompany(order.companyId);
                 const sales = getUser(order.salespersonId);
                 const profile = state.data.profiles.find((item) => item.orderId === order.id);
                 const area = (order.boothSnapshot || []).reduce((sum, booth) => sum + Number(booth.area || 0), 0);
+                const boothText = order.type === "booth" ? orderBoothNos(order) : (order.title || "无展位订单");
+                const areaText = order.type === "booth" ? `${Number(area.toFixed(2))}㎡` : "-";
                 const catalogReady = profile?.catalog?.companyIntro || profile?.catalog?.productIntro ? "已填" : "未填";
                 return `
                   <tr>
                     <td>${companyNameCell(company)}</td>
                     <td>${h(companyShortNameText(company))}</td>
-                    <td>${h(orderBoothNos(order) || "-")}</td>
-                    <td>${Number(area.toFixed(2))}㎡</td>
+                    <td>${h(boothText || "-")}</td>
+                    <td>${h(areaText)}</td>
+                    <td>${statusBadge(order.status)}</td>
                     <td>${h(sales.displayName || "-")}</td>
                     <td>${money(order.paidApprovedAmount || 0)}</td>
                     <td>${orderReserveCountdown(order)}</td>
@@ -4331,7 +4351,7 @@ const App = (() => {
                     <td>${orderActionButtons(order)}</td>
                   </tr>
                 `;
-              }).join("") || `<tr><td colspan="9" class="empty">暂无参展企业</td></tr>`}
+              }).join("") || `<tr><td colspan="10" class="empty">暂无参展企业</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -4999,7 +5019,13 @@ const App = (() => {
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.font = "10px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-        ctx.fillText(String(booth.boothNo || ""), x + boothWidth / 2, y + boothHeight / 2);
+        const labelLines = boothMapLabelLines(booth);
+        if (labelLines.length > 1) {
+          ctx.fillText(String(labelLines[0] || ""), x + boothWidth / 2, y + boothHeight / 2 - 6);
+          ctx.fillText(String(labelLines[1] || ""), x + boothWidth / 2, y + boothHeight / 2 + 6);
+        } else {
+          ctx.fillText(String(labelLines[0] || ""), x + boothWidth / 2, y + boothHeight / 2);
+        }
       }
     });
     (state.data.activityAreas || []).forEach((area) => {
@@ -5451,6 +5477,11 @@ const App = (() => {
         render();
         return;
       }
+      if (!payload.shortName) {
+        state.error = "请填写企业简称";
+        render();
+        return;
+      }
       const result = await run(() => api(`/api/companies/${companyId}`, { method: "PUT", body: payload }), "客户资料已保存");
       if (result) {
         state.companyEditId = null;
@@ -5550,6 +5581,11 @@ const App = (() => {
       const payload = customerDraftPayload();
       if (!payload.name) {
         state.error = "请填写企业名称";
+        render();
+        return;
+      }
+      if (!payload.shortName) {
+        state.error = "请填写企业简称";
         render();
         return;
       }
@@ -7300,6 +7336,7 @@ const App = (() => {
           body.discountRuleId = state.orderDraft.discountRuleId;
         }
         if (!body.company.name) throw new Error("请填写企业名称");
+        if (!body.company.shortName) throw new Error("请填写企业简称");
         const duplicateOrder = state.data.orders.find((order) => (
           order.eventId === state.data.settings.event.id
           && isActiveOrder(order)
