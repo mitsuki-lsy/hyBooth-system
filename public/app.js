@@ -1837,13 +1837,17 @@ const App = (() => {
           <span class="count-pill">${items.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项待办</span>
         </div>
         <div class="todo-grid">
-          ${items.map((item) => `
-            <button type="button" class="todo-card ${Number(item.count || 0) ? h(item.tone) : ""}" onclick="App.openTodoTarget('${h(item.key)}')">
+          ${items.map((item) => {
+            const count = Number(item.count || 0);
+            const toneClass = count > 0 && item.tone !== "normal" ? `todo-${item.tone}` : "";
+            return `
+            <button type="button" class="todo-card ${h(toneClass)}" onclick="App.openTodoTarget('${h(item.key)}')">
               <span>${h(item.title)}</span>
-              <strong>${formatCount(item.count)}</strong>
-              <small>${Number(item.count || 0) ? "点击处理" : "暂无待办"}</small>
+              <strong>${formatCount(count)}</strong>
+              <small>${count > 0 ? "点击处理" : "暂无待办"}</small>
             </button>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       </section>
     `;

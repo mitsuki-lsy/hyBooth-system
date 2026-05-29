@@ -533,6 +533,18 @@ function contractApprovedVoucherWorkdays(db) {
   return Math.max(0, Number(db.settings?.rules?.contractApprovedVoucherWorkdays ?? db.settings?.rules?.reserveWorkdays ?? 7));
 }
 
+function repairKnownMojibakeText(value) {
+  const text = String(value || "").trim();
+  const known = {
+    "\u6d93\u8bf2\u59e9\u6d93\u5b29\u7e5a": "主动下保",
+    "\u93c2\u677f\ue179\u93b4\u8702\u7e5a\u93b6\u3085\u57cc\u93c8\ufffd": "新客户保护到期",
+    "\u9470\u4f78\ue179\u93b4\u8702\u7e5a\u93b6\u3085\u57cc\u93c8\ufffd": "老客户保护到期",
+    "\u7039\u3221\u57db\u6769\u6d98\u53c6\u934f\ue101\u6363": "客户进入公海",
+    "\u7039\u3221\u57db\u6d93\u5b29\u7e5a": "客户下保"
+  };
+  return known[text] || text;
+}
+
 function normalizeCustomerLeads(leads) {
   return (Array.isArray(leads) ? leads : []).map((lead) => ({
     id: Number(lead?.id || 0),
@@ -556,7 +568,7 @@ function normalizeCustomerLeads(leads) {
     voucherReviewedAt: String(lead?.voucherReviewedAt || "").trim(),
     voucherReviewRemark: String(lead?.voucherReviewRemark || "").trim(),
     voucherDueAt: String(lead?.voucherDueAt || "").trim(),
-    publicReason: String(lead?.publicReason || "").trim(),
+    publicReason: repairKnownMojibakeText(lead?.publicReason),
     previousOwnerSalesId: Number(lead?.previousOwnerSalesId || 0) || null,
     contactVersions: normalizeLeadContactVersions(lead?.contactVersions),
     createdAt: String(lead?.createdAt || nowIso()).trim(),
