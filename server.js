@@ -70,7 +70,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 if (!["sqlite", "mysql"].includes(DB_DRIVER)) {
-  throw new Error("DB_DRIVER 浠呮敮鎸?sqlite 鎴?mysql");
+  throw new Error("DB_DRIVER 仅支持 sqlite 或 mysql");
 }
 
 function normalizeColor(value, index = 0) {
@@ -92,7 +92,7 @@ function normalizeZones(zones) {
 }
 
 function normalizeHalls(halls) {
-  const source = Array.isArray(halls) && halls.length ? halls : ["1鍙烽"];
+  const source = Array.isArray(halls) && halls.length ? halls : ["1号馆"];
   return source.map((hall) => String(typeof hall === "string" ? hall : hall?.name || "").trim()).filter(Boolean);
 }
 
@@ -165,7 +165,7 @@ function defaultCountryRegions() {
 
 function normalizeCountryRegions(regions) {
   const source = Array.isArray(regions) && regions.length ? regions : defaultCountryRegions();
-  const forced = new Map([["HK", "涓浗棣欐腐"], ["MO", "涓浗婢抽棬"], ["TW", "涓浗鍙版咕"]]);
+  const forced = new Map([["HK", "中国香港"], ["MO", "中国澳门"], ["TW", "中国台湾"]]);
   const seen = new Set();
   return source.map((item) => {
     const code = String(item?.code || item?.cca2 || "").trim().toUpperCase();
@@ -182,7 +182,7 @@ function normalizeEvents(events, currentEvent) {
     if (!idValue) return;
     map.set(idValue, {
       id: idValue,
-      name: String(event?.name || "鏈懡鍚嶅睍浼?").trim(),
+      name: String(event?.name || "未命名展会").trim(),
       startDate: String(event?.startDate || "").trim(),
       endDate: String(event?.endDate || "").trim(),
       location: String(event?.location || "").trim(),
@@ -194,7 +194,7 @@ function normalizeEvents(events, currentEvent) {
 }
 
 function eventCategory(event) {
-  return String(event?.category || "榛樿绫诲埆").trim() || "榛樿绫诲埆";
+  return String(event?.category || "默认类别").trim() || "默认类别";
 }
 
 function localDateStart(value) {
@@ -222,7 +222,7 @@ function normalizeEventCategories(categories, events = []) {
   ];
   const rows = source
     .map((item) => String(item || "").trim())
-    .filter((item) => item && (item !== "榛樿绫诲埆" || usedCategories.has(item)) && !seen.has(item) && seen.add(item))
+    .filter((item) => item && (item !== "默认类别" || usedCategories.has(item)) && !seen.has(item) && seen.add(item))
     .sort((a, b) => a.localeCompare(b, "zh-CN"));
   return rows;
 }
@@ -665,8 +665,8 @@ function releaseOrderBooths(db, order, reason, actor) {
       booth.updatedAt = nowIso();
     }
   });
-  notify(db, order.salespersonId, "灞曚綅宸查噴鏀?", `${order.orderNo} ${reason}`);
-  writeLog(db, actor || null, "閲婃斁灞曚綅", `${order.orderNo}锛?{reason}`, "order", order.id);
+  notify(db, order.salespersonId, "展位已释放", `${order.orderNo} ${reason}`);
+  writeLog(db, actor || null, "释放展位", `${order.orderNo}，${reason}`, "order", order.id);
   return true;
 }
 
@@ -677,8 +677,8 @@ function releaseLeadToPublic(db, lead, reason, actor) {
   lead.releasedAt = nowIso();
   lead.protectedUntil = "";
   lead.publicReason = reason;
-  if (lead.ownerSalesId) notify(db, lead.ownerSalesId, "瀹㈡埛宸茶繘鍏ュ叕娴?", reason);
-  writeLog(db, actor || null, "瀹㈡埛杩涘叆鍏捣", `${lead.companyId}锛?{reason}`, "customerLead", lead.id);
+  if (lead.ownerSalesId) notify(db, lead.ownerSalesId, "客户已进入公海", reason);
+  writeLog(db, actor || null, "客户进入公海", `${lead.companyId}，${reason}`, "customerLead", lead.id);
   return true;
 }
 
@@ -858,21 +858,21 @@ function syncWorkflowReminders(db) {
   const adminReminder = (title, count) => {
     if (!count) return;
     admins.forEach((admin) => {
-      changed = notifyOnce(db, admin.id, title, `${count} 椤瑰緟澶勭悊锛岃鍒板鏍告ā鍧楁煡鐪媊`, eventId) || changed;
+      changed = notifyOnce(db, admin.id, title, `${count} 项待处理，请到审核模块查看`, eventId) || changed;
     });
   };
 
-  adminReminder("寰呭鏍稿鎴峰悎鍚?", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.contractReviewStatus === "pending").length);
-  adminReminder("寰呭鏍稿鎴锋按鍗?", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.voucherReviewStatus === "pending").length);
-  adminReminder("寰呭鏍搁攢鍞按鍗?", db.payments.filter((payment) => {
+  adminReminder("待审核客户合同", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.contractReviewStatus === "pending").length);
+  adminReminder("待审核客户水单", db.customerLeads.filter((lead) => String(lead.eventId) === String(eventId) && lead.voucherReviewStatus === "pending").length);
+  adminReminder("待审核销售水单", db.payments.filter((payment) => {
     const order = db.orders.find((item) => item.id === payment.orderId);
     return payment.status === "pending" && order && String(order.eventId || eventId) === String(eventId);
   }).length);
-  adminReminder("寰呭鏍歌鍗曞彉鏇?", db.changeRequests.filter((request) => {
+  adminReminder("待审核订单变更", db.changeRequests.filter((request) => {
     const order = db.orders.find((item) => item.id === request.orderId);
     return request.status === "pending" && order && String(order.eventId || eventId) === String(eventId);
   }).length);
-  adminReminder("寰呭鏍告ィ鏉?灞曞叿", db.profiles.filter((profile) => {
+  adminReminder("待审核楣板/展具", db.profiles.filter((profile) => {
     const order = db.orders.find((item) => item.id === profile.orderId);
     if (!order || String(order.eventId || eventId) !== String(eventId)) return false;
     return profile.fascia?.status === "pending" || (profile.rentals || []).some((rental) => rental.status === "pending");
@@ -885,21 +885,21 @@ function syncWorkflowReminders(db) {
     if (order.status !== "sold") {
       if (salesFlowMode(db) === "contract_first") {
         if (!lead || !["pending", "approved"].includes(lead.contractReviewStatus)) {
-          changed = notifyOnce(db, order.salespersonId, "寰呬笂浼犲悎鍚?", `${companyName} ${order.orderNo} 灏氭湭涓婁紶鍚堝悓`, eventId) || changed;
+          changed = notifyOnce(db, order.salespersonId, "待上传合同", `${companyName} ${order.orderNo} 尚未上传合同`, eventId) || changed;
         } else if (lead.contractReviewStatus === "approved" && !["pending", "approved"].includes(lead.voucherReviewStatus)) {
           changed = notifyOnce(db, order.salespersonId, "待上传水单", `${companyName} ${order.orderNo} 合同已通过，尚未上传水单`, eventId) || changed;
         }
       } else if (!lead || !["pending", "approved"].includes(lead.voucherReviewStatus)) {
-        changed = notifyOnce(db, order.salespersonId, "寰呬笂浼犳按鍗?", `${companyName} ${order.orderNo} 灏氭湭涓婁紶姘村崟`, eventId) || changed;
+        changed = notifyOnce(db, order.salespersonId, "待上传水单", `${companyName} ${order.orderNo} 尚未上传水单`, eventId) || changed;
       }
       if (reminderDueSoon(order.reserveExpiresAt, 48) && !leadHasPendingReview(lead)) {
-        changed = notifyOnce(db, order.salespersonId, "灞曚綅鍗冲皢閲婃斁", `${companyName} ${order.orderNo} 棰勭暀鍗冲皢鍒版湡`, eventId) || changed;
+        changed = notifyOnce(db, order.salespersonId, "展位即将释放", `${companyName} ${order.orderNo} 预留即将到期`, eventId) || changed;
       }
     } else if (order.enterpriseUserId) {
       const profile = db.profiles.find((item) => item.orderId === order.id);
       if (!profileCompleteForReminder(profile)) {
-        changed = notifyOnce(db, order.enterpriseUserId, "灞曞姟璧勬枡寰呭～鍐?", `${companyName} 璇疯ˉ鍏呬細鍒娿€佽瘉浠躲€佹ィ鏉挎垨灞曞叿淇℃伅`, eventId) || changed;
-        changed = notifyOnce(db, order.salespersonId, "浼佷笟璧勬枡鏈彁浜?", `${companyName} 灏氭湭鎻愪氦瀹屾暣灞曞姟璧勬枡`, eventId) || changed;
+        changed = notifyOnce(db, order.enterpriseUserId, "展务资料待填写", `${companyName} 请补充会刊、证件、楣板或展具信息`, eventId) || changed;
+        changed = notifyOnce(db, order.salespersonId, "企业资料未提交", `${companyName} 尚未提交完整展务资料`, eventId) || changed;
       }
     }
   });
@@ -1012,7 +1012,7 @@ function deleteEventsById(db, eventIds) {
   });
 
   if (!db.settings.events.length) {
-    db.settings.events.push({ ...db.settings.event, id: "event-2026", name: "榛樿灞曚細", linkedEventId: "" });
+    db.settings.events.push({ ...db.settings.event, id: "event-2026", name: "默认展会", linkedEventId: "" });
   }
   if (ids.has(String(db.settings.event.id))) {
     db.settings.event = db.settings.events[0];
@@ -1123,7 +1123,7 @@ async function syncChinaWorkdays(db, year) {
     sourceUrl: sourceTemplate,
     lastSyncedAt: nowIso(),
     lastStatus: "success",
-    lastMessage: `宸插悓姝?${year} 骞?${Object.keys(days).length} 鏉¤妭鍋囨棩/璋冧紤鏁版嵁`
+    lastMessage: `已同步 ${year} 年 ${Object.keys(days).length} 条节假日/调休数据`
   };
   return db.workdayCalendar[String(year)];
 }
@@ -1149,7 +1149,7 @@ function ensureEnterpriseUserForOrder(db, order, password = "") {
       id: id(db, "user"),
       username: `ent${order.orderNo.toLowerCase()}`,
       passwordHash: hashPassword(initialPassword),
-      displayName: company ? company.name : `浼佷笟${order.id}`,
+      displayName: company ? company.name : `企业${order.id}`,
       role: "enterprise",
       active: true,
       companyId: order.companyId,
@@ -1218,7 +1218,7 @@ function defaultDb() {
         sourceUrl: "https://timor.tech/api/holiday/year/{year}/",
         lastSyncedAt: "",
         lastStatus: "not_synced",
-        lastMessage: "灏氭湭鍚屾锛岀郴缁熶細鍏堟寜鍛ㄤ竴鍒板懆浜旇绠楀伐浣滄棩"
+        lastMessage: "尚未同步，系统会先按周一到周五计算工作日"
       },
       zones: normalizeZones(["A区", "B区", "C区", "D区"]),
       halls: normalizeHalls(["1号馆"]),
@@ -1242,7 +1242,7 @@ function defaultDb() {
         id: 1,
         username: "admin",
         passwordHash: hashPassword("admin123"),
-        displayName: "瓒呯骇绠＄悊鍛?",
+        displayName: "超级管理员",
         role: "admin",
         active: true,
         companyId: null,
@@ -1254,7 +1254,7 @@ function defaultDb() {
         id: 2,
         username: "sales01",
         passwordHash: hashPassword("sales123"),
-        displayName: "涓氬姟鍛樹竴鍙?",
+        displayName: "业务员一号",
         role: "sales",
         active: true,
         companyId: null,
@@ -1280,7 +1280,7 @@ function defaultDb() {
   };
   db.nextIds.user = 3;
   db.workdayCalendar = {};
-  writeLog(db, null, "绯荤粺鍒濆鍖?", "鍒涘缓榛樿璐﹀彿锛屽睍浣嶅浘涓虹┖鐧斤紝绛夊緟绠＄悊鍛樹笂浼犲簳鍥惧苟缁樺埗灞曚綅");
+  writeLog(db, null, "系统初始化", "创建默认账号，展位图为空白，等待管理员上传底图并绘制展位");
   return db;
 }
 
@@ -1386,6 +1386,14 @@ function normalizeDb(db) {
     lastMessage: ""
   };
   db.workdayCalendar = db.workdayCalendar || {};
+  if (!String(db.settings.workdaySync.lastMessage || "").trim() || looksMojibake(db.settings.workdaySync.lastMessage)) {
+    const syncedYears = Object.keys(db.workdayCalendar || {}).sort();
+    const syncedYear = syncedYears[syncedYears.length - 1];
+    const syncedCount = syncedYear ? Object.keys(db.workdayCalendar?.[syncedYear]?.days || {}).length : 0;
+    db.settings.workdaySync.lastMessage = db.settings.workdaySync.lastStatus === "success" && syncedYear
+      ? `已同步 ${syncedYear} 年 ${syncedCount} 条节假日/调休数据`
+      : "尚未同步，系统会先按周一到周五计算工作日";
+  }
   db.map = normalizeMapConfig(db.map || defaultMapConfig());
   db.settings.event = db.settings.event || { id: "event-2026", name: "默认展会" };
   db.settings.event.id = String(db.settings.event.id || "event-2026").trim();
@@ -1429,7 +1437,7 @@ function normalizeDb(db) {
   db.nextIds.department = Math.max(Number(db.nextIds.department || 1), ...db.settings.departments.map((item) => item.id + 1), 1);
   ensureDefaultEventRoles(db);
   db.booths.forEach((booth) => {
-    booth.hall = String(booth.hall || db.settings.halls[0] || "1鍙烽").trim();
+    booth.hall = String(booth.hall || db.settings.halls[0] || "1号馆").trim();
     booth.locked = Boolean(booth.locked);
     booth.departmentId = Number(booth.departmentId || 0) || null;
     if (booth.departmentId && !departmentIds.has(Number(booth.departmentId))) booth.departmentId = null;
@@ -1730,7 +1738,7 @@ function generateBoothGrid(db, options) {
         area,
         widthM: attr === "raw" ? 6 : 3,
         depthM: attr === "raw" ? 6 : 3,
-        hall: db.settings.halls[0] || "1鍙烽",
+        hall: db.settings.halls[0] || "1号馆",
         zone: zoneName(db.settings.zones[Math.min(db.settings.zones.length - 1, Math.floor(row / Math.max(1, rows / db.settings.zones.length)))]) || "A鍖?",
         attr,
         price: 0,
@@ -1807,7 +1815,8 @@ function send(res, status, data, headers = {}) {
 }
 
 function looksMojibake(value) {
-  return /[�]|[璇鏃浼瀹鎵鍙鍚绋閮灞闄妯鍥鐢璐鍒姘椤缂绾]/.test(String(value || ""));
+  const text = String(value || "");
+  return text.includes("\ufffd") || /[\u7487\u93c3\u6d7c\u7039\u93b5\u9359\u934f\u935a\u7a0b\u95ae\u705e\u95c4\u59af\u934d\u9422\u8d10\u934a\u59d8\u6924\u6924\u7f02\u7efe]/.test(text);
 }
 
 function fallbackErrorMessage(status) {
@@ -1834,7 +1843,7 @@ function reviewRemarkFromBody(body) {
 
 function requireRejectedReviewRemark(res, status, body) {
   if (status === "rejected" && !reviewRemarkFromBody(body)) {
-    sendError(res, 400, "瀹℃牳涓嶉€氳繃鏃跺繀椤诲～鍐欏師鍥?");
+    sendError(res, 400, "审核不通过时必须填写原因");
     return false;
   }
   return true;
@@ -1846,7 +1855,7 @@ function readBody(req) {
     req.on("data", (chunk) => {
       raw += chunk;
       if (raw.length > 40 * 1024 * 1024) {
-        reject(new Error("璇锋眰浣撹秴杩?40MB 闄愬埗"));
+        reject(new Error("请求体超过 40MB 限制"));
         req.destroy();
       }
     });
@@ -1855,7 +1864,7 @@ function readBody(req) {
       try {
         return resolve(JSON.parse(raw));
       } catch (error) {
-        return reject(new Error("JSON 鏍煎紡涓嶆纭?"));
+        return reject(new Error("JSON 格式不正确"));
       }
     });
     req.on("error", reject);
@@ -1886,14 +1895,14 @@ function fetchJson(url) {
         }
       });
     });
-    request.on("timeout", () => request.destroy(new Error("鍚屾瓒呮椂")));
+    request.on("timeout", () => request.destroy(new Error("同步超时")));
     request.on("error", reject);
   });
 }
 
 async function syncCountryRegions() {
   const rows = await fetchJson("https://restcountries.com/v3.1/all?fields=name,cca2,translations");
-  const forced = new Map([["HK", "涓浗棣欐腐"], ["MO", "涓浗婢抽棬"], ["TW", "涓浗鍙版咕"]]);
+  const forced = new Map([["HK", "中国香港"], ["MO", "中国澳门"], ["TW", "中国台湾"]]);
   const regions = rows.map((item) => {
     const code = String(item.cca2 || "").toUpperCase();
     const name = forced.get(code)
@@ -1975,8 +1984,8 @@ function releaseExpiredOrders(db, actor) {
       if (lead.voucherReviewStatus === "approved") return;
       const due = new Date(lead.voucherDueAt || order.reserveExpiresAt).getTime();
       if (Number.isFinite(due) && due > now) return;
-      releaseLeadToPublic(db, lead, "鍚堝悓瀹℃牳閫氳繃鍚庢湭鍦ㄨ瀹氭湡闄愬唴涓婁紶姘村崟", actor);
-      if (releaseOrderBooths(db, order, "鍚堝悓瀹℃牳閫氳繃鍚庢湭鍦ㄨ瀹氭湡闄愬唴涓婁紶姘村崟", actor)) released.push(order);
+      releaseLeadToPublic(db, lead, "合同审核通过后未在规定期限内上传水单", actor);
+      if (releaseOrderBooths(db, order, "合同审核通过后未在规定期限内上传水单", actor)) released.push(order);
       return;
     }
     if (lead && salesFlowMode(db) === "voucher_direct" && lead.voucherReviewStatus === "approved") return;
@@ -2038,16 +2047,16 @@ function applyOrderDiscount(db, order, subtotal) {
 
 function applyChangeRequest(db, request) {
   const order = db.orders.find((item) => item.id === request.orderId);
-  if (!order) return { ok: false, status: 404, error: "璁㈠崟涓嶅瓨鍦?" };
+  if (!order) return { ok: false, status: 404, error: "订单不存在" };
   const data = request.changeData || {};
   if (data.action === "change_booth") {
-    if (order.type !== "booth") return { ok: false, status: 409, error: "鏃犲睍浣嶈鍗曚笉鑳芥洿鎹㈠睍浣?" };
-    if (isClosedOrderStatus(order.status)) return { ok: false, status: 409, error: "宸茬粨鏉熻鍗曚笉鑳芥洿鎹㈠睍浣?" };
+    if (order.type !== "booth") return { ok: false, status: 409, error: "无展位订单不能更换展位" };
+    if (isClosedOrderStatus(order.status)) return { ok: false, status: 409, error: "已结束订单不能更换展位" };
     const boothIds = [...new Set(Array.isArray(data.boothIds) ? data.boothIds.map(Number).filter(Boolean) : [])];
-    if (!boothIds.length) return { ok: false, status: 400, error: "璇烽€夋嫨鏂扮殑灞曚綅" };
+    if (!boothIds.length) return { ok: false, status: 400, error: "请选择新的展位" };
     const booths = boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || order.eventId) === String(order.eventId)));
-    if (booths.some((booth) => !booth)) return { ok: false, status: 404, error: "鏂板睍浣嶄笉瀛樺湪" };
-    if (booths.some((booth) => booth.status !== "available")) return { ok: false, status: 409, error: "鏂板睍浣嶅凡琚崰鐢紝涓嶈兘閫氳繃璇ュ彉鏇?" };
+    if (booths.some((booth) => !booth)) return { ok: false, status: 404, error: "新展位不存在" };
+    if (booths.some((booth) => booth.status !== "available")) return { ok: false, status: 409, error: "新展位已被占用，不能通过该变更" };
     if (booths.some((booth) => !canOrderUseBoothDepartment(db, order, booth))) return { ok: false, status: 403, error: "新展位不属于订单业务员部门，不能通过该变更" };
 
     order.boothIds.forEach((boothId) => {
@@ -2076,14 +2085,14 @@ function applyChangeRequest(db, request) {
     booths.forEach((booth) => {
       booth.status = order.status === "sold" ? "sold" : "reserved";
     });
-    return { ok: true, detail: `${order.orderNo} 宸叉洿鎹负 ${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ")}` };
+    return { ok: true, detail: `${order.orderNo} 已更换为 ${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ")}` };
   }
 
   if (data.action === "cancel_order") {
-    if (isClosedOrderStatus(order.status)) return { ok: false, status: 409, error: "璁㈠崟宸茬粡缁撴潫" };
+    if (isClosedOrderStatus(order.status)) return { ok: false, status: 409, error: "订单已经结束" };
     order.status = "cancelled";
     order.cancelledAt = nowIso();
-    order.cancelReason = request.detail || "閫€璁㈠睍浣?";
+    order.cancelReason = request.detail || "退订展位";
     order.updatedAt = nowIso();
     order.boothIds.forEach((boothId) => {
       const booth = db.booths.find((item) => item.id === boothId && item.orderId === order.id);
@@ -2095,13 +2104,13 @@ function applyChangeRequest(db, request) {
         booth.updatedAt = nowIso();
       }
     });
-    return { ok: true, detail: `${order.orderNo} 宸查€€璁紝灞曚綅宸查噴鏀綻 ` };
+    return { ok: true, detail: `${order.orderNo} 已退订，展位已释放` };
   }
 
   if (data.action === "special_order") {
-    if (!isActiveOrder(order)) return { ok: false, status: 409, error: "璁㈠崟宸茬粡缁撴潫锛屼笉鑳借浆涓虹壒娈婅鍗?" };
-    if (order.status === "sold" && !order.specialApproved) return { ok: false, status: 409, error: "璁㈠崟宸茬粡鎴愪氦锛屾棤闇€杞负鐗规畩璁㈠崟" };
-    if (Number(order.totalAmount || 0) <= 0) return { ok: false, status: 409, error: "璁㈠崟閲戦涓?0锛屼笉鑳界敵璇风壒娈婅鍗?" };
+    if (!isActiveOrder(order)) return { ok: false, status: 409, error: "订单已经结束，不能转为特殊订单" };
+    if (order.status === "sold" && !order.specialApproved) return { ok: false, status: 409, error: "订单已经成交，无需转为特殊订单" };
+    if (Number(order.totalAmount || 0) <= 0) return { ok: false, status: 409, error: "订单金额为 0，不能申请特殊订单" };
     order.specialApproved = true;
     order.specialApprovedAt = nowIso();
     order.specialRequestId = request.id;
@@ -2118,10 +2127,10 @@ function applyChangeRequest(db, request) {
       ensureProfile(db, order);
     }
     markCustomerLeadConverted(db, order.eventId, order.companyId);
-    return { ok: true, detail: `${order.orderNo} 宸查€氳繃鐗规畩璁㈠崟鐢宠锛岃鍏ユ垚浜や絾涓嶅鍔犲埌娆鹃噾棰漙 ` };
+    return { ok: true, detail: `${order.orderNo} 已通过特殊订单申请，计入成交但不增加到款金额` };
   }
 
-  return { ok: true, detail: `${order.orderNo} 鍙樻洿宸插鏍搁€氳繃` };
+  return { ok: true, detail: `${order.orderNo} 变更已审核通过` };
 }
 
 function buildBootstrap(db, user) {
@@ -2236,7 +2245,7 @@ function dashboard(db, user) {
       const department = departments.find((item) => Number(item.id) === departmentId);
       departmentRows.set(key, {
         departmentId,
-        departmentName: department?.name || "鏈垎閰嶉儴闂?",
+        departmentName: department?.name || "未分配部门",
         salespersonIds: new Set(),
         companyIds: new Set(),
         boothCount: 0,
@@ -2331,21 +2340,21 @@ async function handleApi(req, res, url, body = {}) {
   if (pathname === "/api/auth/login" && method === "POST") {
     const found = db.users.find((item) => item.username === body.username && item.active);
     if (!found || found.passwordHash !== hashPassword(body.password || "")) {
-      return sendError(res, 401, "璐﹀彿鎴栧瘑鐮佷笉姝ｇ‘");
+      return sendError(res, 401, "账号或密码不正确");
     }
     const requestedCategory = String(body.eventCategory || "").trim();
-    if (!body.eventId) return sendError(res, 400, "璇峰厛閫夋嫨灞曚細绫诲埆鍜屽睍浼?");
+    if (!body.eventId) return sendError(res, 400, "请先选择展会类别和展会");
     const event = eventById(db, body.eventId);
-    if (!event) return sendError(res, 404, "灞曚細涓嶅瓨鍦?");
-    if (requestedCategory && eventCategory(event) !== requestedCategory) return sendError(res, 400, "灞曚細绫诲埆涓庡睍浼氫笉鍖归厤");
+    if (!event) return sendError(res, 404, "展会不存在");
+    if (requestedCategory && eventCategory(event) !== requestedCategory) return sendError(res, 400, "展会类别与展会不匹配");
     const role = effectiveEventRole(db, found, event.id);
-    if (!role) return sendError(res, 403, "璇ヨ处鍙锋病鏈夋墍閫夊睍浼氱殑鐧诲綍鏉冮檺");
+    if (!role) return sendError(res, 403, "该账号没有所选展会的登录权限");
     const newToken = randomToken();
     db.sessions[newToken] = { userId: found.id, eventId: event.id, role, createdAt: nowIso() };
     db.settings.event = event;
     ensureEventMap(db, event.id);
     found.lastLoginAt = nowIso();
-    writeLog(db, { ...found, role }, "鐧诲綍绯荤粺", `${found.username} / ${event.name}`, "user", found.id);
+    writeLog(db, { ...found, role }, "登录系统", `${found.username} / ${event.name}`, "user", found.id);
     saveDb(db);
     return send(res, 200, { token: newToken, user: sanitizeUser({ ...found, role, eventId: event.id }) });
   }
@@ -2368,11 +2377,11 @@ async function handleApi(req, res, url, body = {}) {
 
   if (pathname === "/api/auth/enterprise-link" && method === "POST") {
     const accessToken = String(body.token || "").trim();
-    if (!accessToken) return sendError(res, 400, "閾炬帴鍙傛暟涓嶆纭?");
+    if (!accessToken) return sendError(res, 400, "链接参数不正确");
     const order = db.orders.find((item) => item.enterpriseAccessToken === accessToken);
-    if (!order || order.type !== "booth" || order.status !== "sold") return sendError(res, 404, "浼佷笟閾炬帴涓嶅瓨鍦ㄦ垨璁㈠崟灏氭湭鎴愪氦");
+    if (!order || order.type !== "booth" || order.status !== "sold") return sendError(res, 404, "企业链接不存在或订单尚未成交");
     const expiresAt = new Date(order.enterpriseAccessExpiresAt || 0).getTime();
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return sendError(res, 410, "浼佷笟閾炬帴宸茶繃鏈燂紝璇疯仈绯讳笟鍔″憳閲嶆柊鐢熸垚");
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return sendError(res, 410, "企业链接已过期，请联系业务员重新生成");
     const event = eventById(db, order.eventId) || db.settings.event;
     const enterpriseUser = ensureEnterpriseUserForOrder(db, order, "");
     const newToken = randomToken();
@@ -2380,12 +2389,12 @@ async function handleApi(req, res, url, body = {}) {
     db.settings.event = event;
     ensureEventMap(db, event.id);
     enterpriseUser.lastLoginAt = nowIso();
-    writeLog(db, { ...enterpriseUser, role: "enterprise" }, "浼佷笟鍏嶇櫥褰曢摼鎺ヨ繘鍏?", `${order.orderNo} / ${event.name}`, "order", order.id);
+    writeLog(db, { ...enterpriseUser, role: "enterprise" }, "企业免登录链接进入", `${order.orderNo} / ${event.name}`, "order", order.id);
     saveDb(db);
     return send(res, 200, { token: newToken, user: sanitizeUser({ ...enterpriseUser, role: "enterprise", eventId: event.id }), expiresAt: order.enterpriseAccessExpiresAt });
   }
 
-  if (!user) return sendError(res, 401, "璇峰厛鐧诲綍");
+  if (!user) return sendError(res, 401, "请先登录");
   applySessionEvent(db, session);
   const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
   const remindersChanged = syncWorkflowReminders(db);
@@ -2413,7 +2422,7 @@ async function handleApi(req, res, url, body = {}) {
       && Number(item.userId) === Number(user.id)
       && String(item.eventId || db.settings.event.id) === String(db.settings.event.id)
     ));
-    if (!notification) return sendError(res, 404, "鎻愰啋涓嶅瓨鍦?");
+    if (!notification) return sendError(res, 404, "提醒不存在");
     notification.read = true;
     notification.readAt = nowIso();
     saveDb(db);
@@ -2421,46 +2430,46 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/event" && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const currentEvent = eventById(db, db.settings.event.id) || db.settings.event || {};
     const event = {
       id: String(currentEvent.id || "event-2026").trim(),
-      name: String(body.name || "鏈懡鍚嶅睍浼?").trim(),
+      name: String(body.name || "未命名展会").trim(),
       startDate: String(body.startDate || "").trim(),
       endDate: String(body.endDate || "").trim(),
       location: String(body.location || "").trim(),
       category: isSuperAdmin(user) ? eventCategory({ category: body.category }) : eventCategory(currentEvent),
       linkedEventId: isSuperAdmin(user) ? String(body.linkedEventId || "").trim() : String(currentEvent.linkedEventId || "").trim()
     };
-    if (!event.id || !event.name) return sendError(res, 400, "璇峰～鍐欏睍浼氱紪鍙峰拰鍚嶇О");
+    if (!event.id || !event.name) return sendError(res, 400, "请填写展会编号和名称");
     if (isSuperAdmin(user) && !normalizeEventCategories(db.settings.eventCategories, db.settings.events).includes(event.category)) {
-      return sendError(res, 400, "璇峰厛鍦ㄥ睍浼氬垪琛ㄤ腑鏂板灞曚細绫诲埆");
+      return sendError(res, 400, "请先在展会列表中新增展会类别");
     }
     db.settings.event = event;
     db.settings.events = normalizeEvents(db.settings.events, event);
     ensureEventMap(db, event.id);
-    writeLog(db, user, "鏇存柊灞曚細淇℃伅", event.name, "event", event.id);
+    writeLog(db, user, "更新展会信息", event.name, "event", event.id);
     saveDb(db);
     return send(res, 200, { event: db.settings.event, events: db.settings.events });
   }
 
   if (pathname === "/api/events" && method === "POST") {
-    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "鍙湁瓒呯骇绠＄悊鍛樺彲浠ユ柊澧炲睍浼?");
+    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "只有超级管理员可以新增展会");
     const category = eventCategory({ category: body.category });
     if (!normalizeEventCategories(db.settings.eventCategories, db.settings.events).includes(category)) {
-      return sendError(res, 400, "璇峰厛鍦ㄥ睍浼氬垪琛ㄤ腑鏂板灞曚細绫诲埆");
+      return sendError(res, 400, "请先在展会列表中新增展会类别");
     }
     const event = {
       id: String(body.id || `event-${Date.now()}`).trim(),
-      name: String(body.name || "鏈懡鍚嶅睍浼?").trim(),
+      name: String(body.name || "未命名展会").trim(),
       startDate: String(body.startDate || "").trim(),
       endDate: String(body.endDate || "").trim(),
       location: String(body.location || "").trim(),
       category,
       linkedEventId: String(body.linkedEventId || "").trim()
     };
-    if (!event.id || !event.name) return sendError(res, 400, "璇峰～鍐欏睍浼氱紪鍙峰拰鍚嶇О");
-    if (eventById(db, event.id)) return sendError(res, 409, "灞曚細缂栧彿宸插瓨鍦?");
+    if (!event.id || !event.name) return sendError(res, 400, "请填写展会编号和名称");
+    if (eventById(db, event.id)) return sendError(res, 409, "展会编号已存在");
     db.settings.event = event;
     db.settings.events = normalizeEvents([...(db.settings.events || []), event], event);
     ensureEventMap(db, event.id);
@@ -2468,40 +2477,40 @@ async function handleApi(req, res, url, body = {}) {
       session.eventId = event.id;
       session.role = "admin";
     }
-    writeLog(db, user, "鏂板灞曚細", event.name, "event", event.id);
+    writeLog(db, user, "新增展会", event.name, "event", event.id);
     saveDb(db);
     return send(res, 200, { event: db.settings.event, events: db.settings.events });
   }
 
   if (pathname === "/api/event-categories" && method === "POST") {
-    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "鍙湁瓒呯骇绠＄悊鍛樺彲浠ユ柊澧炲睍浼氱被鍒?");
+    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "只有超级管理员可以新增展会类别");
     const category = eventCategory({ category: body.name || body.category });
     db.settings.eventCategories = normalizeEventCategories([...(db.settings.eventCategories || []), category], db.settings.events);
-    writeLog(db, user, "鏂板灞曚細绫诲埆", category, "event");
+    writeLog(db, user, "新增展会类别", category, "event");
     saveDb(db);
     return send(res, 200, { categories: db.settings.eventCategories });
   }
 
   const eventCategoryMatch = pathname.match(/^\/api\/event-categories\/(.+)$/);
   if (eventCategoryMatch && method === "DELETE") {
-    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "鍙湁瓒呯骇绠＄悊鍛樺彲浠ュ垹闄ゅ睍浼氱被鍒?");
+    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "只有超级管理员可以删除展会类别");
     const category = eventCategory({ category: decodeURIComponent(eventCategoryMatch[1]) });
     if ((db.settings.events || []).some((event) => eventCategory(event) === category)) {
-      return sendError(res, 409, "璇ョ被鍒笅杩樻湁灞曚細锛屼笉鑳藉垹闄?");
+      return sendError(res, 409, "该类别下还有展会，不能删除");
     }
     db.settings.eventCategories = normalizeEventCategories(
       (db.settings.eventCategories || []).filter((item) => eventCategory({ category: item }) !== category),
       db.settings.events
     );
-    writeLog(db, user, "鍒犻櫎灞曚細绫诲埆", category, "event");
+    writeLog(db, user, "删除展会类别", category, "event");
     saveDb(db);
     return send(res, 200, { categories: db.settings.eventCategories });
   }
 
   if (pathname === "/api/event-roles" && method === "PUT") {
-    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "鍙湁瓒呯骇绠＄悊鍛樺彲浠ュ垎閰嶅睍浼氭潈闄?");
+    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "只有超级管理员可以分配展会权限");
     const eventId = String(body.eventId || db.settings.event.id).trim();
-    if (!eventById(db, eventId)) return sendError(res, 404, "灞曚細涓嶅瓨鍦?");
+    if (!eventById(db, eventId)) return sendError(res, 404, "展会不存在");
     const assignments = Array.isArray(body.assignments) ? body.assignments : [];
     const rows = assignments.map((item) => {
       const targetUser = db.users.find((row) => row.id === Number(item.userId));
@@ -2511,26 +2520,26 @@ async function handleApi(req, res, url, body = {}) {
       return { eventId, userId: targetUser.id, role };
     }).filter(Boolean);
     db.eventRoles = db.eventRoles.filter((row) => row.eventId !== eventId).concat(rows);
-    writeLog(db, user, "鍒嗛厤灞曚細鏉冮檺", `${eventId}锛?{rows.length} 涓处鍙穈, "event"`, eventId);
+    writeLog(db, user, "分配展会权限", `${eventId}，${rows.length} 个账号`, "event", eventId);
     saveDb(db);
     return send(res, 200, { eventRoles: db.eventRoles });
   }
 
   if (pathname === "/api/events/delete" && method === "POST") {
-    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "鍙湁瓒呯骇绠＄悊鍛樺彲浠ユ竻闄ゅ睍浼氭暟鎹?");
+    if (!requireRole(user, ["superadmin"])) return sendError(res, 403, "只有超级管理员可以清除展会数据");
     const eventIds = [...new Set((Array.isArray(body.eventIds) ? body.eventIds : []).map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!eventIds.length) return sendError(res, 400, "璇烽€夋嫨瑕佹竻闄ょ殑灞曚細");
+    if (!eventIds.length) return sendError(res, 400, "请选择要清除的展会");
     const existingIds = new Set((db.settings.events || []).map((event) => event.id));
     const missing = eventIds.filter((eventId) => !existingIds.has(eventId));
-    if (missing.length) return sendError(res, 404, `灞曚細涓嶅瓨鍦細${missing.join(" / ")}`);
+    if (missing.length) return sendError(res, 404, `展会不存在：${missing.join(" / ")}`);
     const withOrders = eventIds
       .map((eventId) => ({ eventId, count: eventOrderCount(db, eventId), event: eventById(db, eventId) }))
       .filter((item) => item.count > 0);
     if (withOrders.length) {
-      return sendError(res, 409, `灞曚細宸叉湁璁㈠崟锛屼笉鑳藉垹闄わ細${withOrders.map((item) => `${item.event?.name || item.eventId}(${item.count})`).join(" / ")}`);
+      return sendError(res, 409, `展会已有订单，不能删除：${withOrders.map((item) => `${item.event?.name || item.eventId}(${item.count})`).join(" / ")}`);
     }
     const result = deleteEventsById(db, eventIds);
-    writeLog(db, user, "娓呴櫎灞曚細鏁版嵁", result.deletedEvents.join(" / "), "event", result.deletedEvents.join(","));
+    writeLog(db, user, "清除展会数据", result.deletedEvents.join(" / "), "event", result.deletedEvents.join(","));
     saveDb(db);
     return send(res, 200, result);
   }
@@ -2543,9 +2552,9 @@ async function handleApi(req, res, url, body = {}) {
         sourceUrl: "https://restcountries.com/v3.1/all?fields=name,cca2,translations",
         lastSyncedAt: nowIso(),
         lastStatus: "success",
-        lastMessage: `宸插悓姝?${db.settings.countryRegions.length} 涓浗瀹舵垨鍦板尯`
+        lastMessage: `已同步 ${db.settings.countryRegions.length} 个国家或地区`
       };
-      writeLog(db, user, "鍚屾鍥藉鎴栧湴鍖?", db.settings.countryRegionSync.lastMessage);
+      writeLog(db, user, "同步国家或地区", db.settings.countryRegionSync.lastMessage);
       saveDb(db);
       return send(res, 200, { countryRegions: db.settings.countryRegions, sync: db.settings.countryRegionSync });
     } catch (error) {
@@ -2553,15 +2562,15 @@ async function handleApi(req, res, url, body = {}) {
         sourceUrl: "https://restcountries.com/v3.1/all?fields=name,cca2,translations",
         lastSyncedAt: nowIso(),
         lastStatus: "failed",
-        lastMessage: error.message || "鍚屾澶辫触"
+        lastMessage: error.message || "同步失败"
       };
       saveDb(db);
-      return sendError(res, 502, `鍥藉鎴栧湴鍖哄悓姝ュけ璐ワ細${db.settings.countryRegionSync.lastMessage}`);
+      return sendError(res, 502, `国家或地区同步失败：${db.settings.countryRegionSync.lastMessage}`);
     }
   }
 
   if (pathname === "/api/settings" && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const incomingRules = { ...(body.rules || {}) };
     if (!isSuperAdmin(user)) delete incomingRules.adminContactMaskMode;
     const hasEnterpriseLinkDays = incomingRules.enterpriseLinkDays !== undefined;
@@ -2605,7 +2614,7 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/workdays/sync" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const year = Number(body.year || new Date().getFullYear());
     try {
       const calendar = await syncChinaWorkdays(db, year);
@@ -2617,42 +2626,42 @@ async function handleApi(req, res, url, body = {}) {
         ...(db.settings.workdaySync || {}),
         lastSyncedAt: nowIso(),
         lastStatus: "failed",
-        lastMessage: error.message || "鍚屾澶辫触"
+        lastMessage: error.message || "同步失败"
       };
-      writeLog(db, user, "鍚屾涓浗澶ч檰宸ヤ綔鏃ュけ璐?", db.settings.workdaySync.lastMessage, "workday", year);
+      writeLog(db, user, "同步中国大陆工作日失败", db.settings.workdaySync.lastMessage, "workday", year);
       saveDb(db);
-      return sendError(res, 502, `宸ヤ綔鏃ュ悓姝ュけ璐ワ細${db.settings.workdaySync.lastMessage}`);
+      return sendError(res, 502, `工作日同步失败：${db.settings.workdaySync.lastMessage}`);
     }
   }
 
   if (pathname === "/api/uploads" && method === "POST") {
     const dataUrl = String(body.dataUrl || "");
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (!match) return sendError(res, 400, "鏂囦欢鏁版嵁鏍煎紡涓嶆纭?");
+    if (!match) return sendError(res, 400, "文件数据格式不正确");
     const mimeType = match[1];
     const buffer = Buffer.from(match[2], "base64");
     const originalName = String(body.fileName || "upload.bin").replace(/[\\/:*?"<>|]/g, "_");
     const category = body.category || "general";
     const leadId = Number(body.leadId || 0);
     const lead = leadId ? db.customerLeads.find((item) => item.id === leadId && String(item.eventId) === String(db.settings.event.id)) : null;
-    if (leadId && !lead) return sendError(res, 404, "瀹㈡埛涓嶅瓨鍦?");
+    if (leadId && !lead) return sendError(res, 404, "客户不存在");
     if (lead && !isAdminLike(user) && !canAccessSalesOwner(db, user, lead.ownerSalesId)) {
-      return sendError(res, 403, "鏃犳潈涓婁紶璇ュ鎴烽檮浠?");
+      return sendError(res, 403, "无权上传该客户附件");
     }
     if (["customer-contract", "customer-voucher"].includes(category)) {
-      if (!lead) return sendError(res, 400, "瀹㈡埛闄勪欢蹇呴』鍏宠仈瀹㈡埛");
+      if (!lead) return sendError(res, 400, "客户附件必须关联客户");
       const allowed = ["application/pdf", "image/jpeg", "image/png"].includes(mimeType) || /\.(pdf|jpe?g|png)$/i.test(originalName);
-      if (!allowed) return sendError(res, 400, "鍚堝悓鍜屾按鍗曚粎鏀寔 PDF銆丣PG銆丳NG 鏂囦欢");
+      if (!allowed) return sendError(res, 400, "合同和水单仅支持 PDF、JPG、PNG 文件");
       if (category === "customer-voucher" && salesFlowMode(db) === "contract_first" && lead.contractReviewStatus !== "approved") {
-        return sendError(res, 409, "褰撳墠閿€鍞祦绋嬭姹傚悎鍚屽鏍搁€氳繃鍚庢墠鑳戒笂浼犳按鍗?");
+        return sendError(res, 409, "当前销售流程要求合同审核通过后才能上传水单");
       }
       if (category === "customer-voucher" && salesFlowMode(db) === "contract_first") {
         const due = new Date(lead.voucherDueAt || 0).getTime();
-        if (Number.isFinite(due) && due <= Date.now()) return sendError(res, 409, "鍚堝悓閫氳繃鍚庣殑姘村崟涓婁紶鏈熼檺宸茶繃");
+        if (Number.isFinite(due) && due <= Date.now()) return sendError(res, 409, "合同通过后的水单上传期限已过");
       }
     }
     if (category !== "map-background" && isImageFile(mimeType, originalName) && buffer.length > IMAGE_UPLOAD_LIMIT) {
-      return sendError(res, 413, "闄ゅ睍浣嶅浘搴曞浘澶栵紝鍥剧墖澶у皬涓嶈兘瓒呰繃 3MB");
+      return sendError(res, 413, "除展位图底图外，图片大小不能超过 3MB");
     }
     let storedFileName = originalName;
     let storedMimeType = mimeType;
@@ -2728,7 +2737,7 @@ async function handleApi(req, res, url, body = {}) {
       lead.voucherReviewRemark = "";
       eventAdminUsers(db, lead.eventId).forEach((admin) => notify(db, admin.id, "待审核客户水单", `${db.companies.find((item) => item.id === lead.companyId)?.name || "客户"} 上传了水单`));
     }
-    writeLog(db, user, "涓婁紶闄勪欢", originalName, "attachment", attachment.id);
+    writeLog(db, user, "上传附件", originalName, "attachment", attachment.id);
     saveDb(db);
     return send(res, 200, { attachment });
   }
@@ -2736,9 +2745,9 @@ async function handleApi(req, res, url, body = {}) {
   if (pathname.startsWith("/api/files/") && method === "GET") {
     const attachmentId = Number(pathname.split("/").pop());
     const attachment = db.attachments.find((item) => item.id === attachmentId);
-    if (!canAccessAttachment(db, user, attachment)) return sendError(res, 403, "鏃犳潈璁块棶闄勪欢");
+    if (!canAccessAttachment(db, user, attachment)) return sendError(res, 403, "无权访问附件");
     const filePath = path.join(UPLOAD_DIR, attachment.storageName);
-    if (!fs.existsSync(filePath)) return sendError(res, 404, "鏂囦欢涓嶅瓨鍦?");
+    if (!fs.existsSync(filePath)) return sendError(res, 404, "文件不存在");
     res.writeHead(200, {
       "Content-Type": attachment.mimeType || "application/octet-stream",
       "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`
@@ -2748,9 +2757,9 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/map/background" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const attachment = db.attachments.find((item) => item.id === Number(body.attachmentId));
-    if (!attachment) return sendError(res, 404, "闄勪欢涓嶅瓨鍦?");
+    if (!attachment) return sendError(res, 404, "附件不存在");
     const map = ensureEventMap(db, db.settings.event.id);
     const drawnBooths = eventBooths(db, db.settings.event.id);
     const hasDrawnBooths = drawnBooths.length > 0;
@@ -2770,7 +2779,7 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/map/settings" && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const map = ensureEventMap(db, db.settings.event.id);
     const oldWidth = Number(map.width || 1);
     const oldHeight = Number(map.height || 1);
@@ -2789,7 +2798,7 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/map/snapshot" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const eventId = db.settings.event.id;
     const incomingBooths = Array.isArray(body.booths) ? body.booths : [];
     const incomingObstacles = Array.isArray(body.obstacles) ? body.obstacles : [];
@@ -2819,7 +2828,7 @@ async function handleApi(req, res, url, body = {}) {
       if (!next) return true;
       return snapshotCompareKeys.some((key) => String(next[key] ?? "") !== String(booth[key] ?? ""));
     });
-    if (changedProtected.length) return sendError(res, 409, `鏈夊凡棰勭暀/鎴愪氦/閿佸畾灞曚綅锛屼笉鑳介€氳繃鎾ら攢瑕嗙洊锛?{changedProtected.map((booth) => booth.boothNo).join(" / ")}`);
+    if (changedProtected.length) return sendError(res, 409, `有已预留/成交/锁定展位，不能通过撤销覆盖：${changedProtected.map((booth) => booth.boothNo).join(" / ")}`);
     const boothIds = new Set();
     const restoredBooths = incomingBooths.map((item) => {
       const booth = {
@@ -2833,7 +2842,7 @@ async function handleApi(req, res, url, body = {}) {
         area: Number(item.area || 9),
         widthM: Number(item.widthM || 3),
         depthM: Number(item.depthM || 3),
-        hall: String(item.hall || db.settings.halls[0] || "1鍙烽").trim(),
+        hall: String(item.hall || db.settings.halls[0] || "1号馆").trim(),
         zone: String(item.zone || zoneName(db.settings.zones[0]) || "A鍖?").trim(),
         attr: item.attr === "raw" ? "raw" : "standard",
         departmentId: Number(item.departmentId || 0) || null,
@@ -2855,7 +2864,7 @@ async function handleApi(req, res, url, body = {}) {
       type: item.type === "internal" ? "internal" : "external",
       shape: item.shape === "circle" ? "circle" : "rect",
       boothId: item.type === "internal" && boothIds.has(Number(item.boothId)) ? Number(item.boothId) : null,
-      label: String(item.label || (item.type === "internal" ? "灞曚綅鍐呴殰纰嶇墿" : "灞曚綅澶栭殰纰嶇墿")).trim(),
+      label: String(item.label || (item.type === "internal" ? "展位内障碍物" : "展位外障碍物")).trim(),
       x: Number(item.x || 0),
       y: Number(item.y || 0),
       width: Number(item.width || 0),
@@ -2884,13 +2893,13 @@ async function handleApi(req, res, url, body = {}) {
     db.nextIds.booth = Math.max(Number(db.nextIds.booth || 1), ...db.booths.map((booth) => Number(booth.id || 0) + 1), 1);
     db.nextIds.obstacle = Math.max(Number(db.nextIds.obstacle || 1), ...db.obstacles.map((obstacle) => Number(obstacle.id || 0) + 1), 1);
     db.nextIds.activityArea = Math.max(Number(db.nextIds.activityArea || 1), ...db.activityAreas.map((area) => Number(area.id || 0) + 1), 1);
-    writeLog(db, user, "鎭㈠灞曚綅鍥惧揩鐓?", `${restoredBooths.length} 涓睍浣?/ ${restoredObstacles.length} 涓殰纰嶇墿 / ${restoredActivityAreas.length} 个活动区`);
+    writeLog(db, user, "恢复展位图快照", `${restoredBooths.length} 个展位/ ${restoredObstacles.length} 个障碍物 / ${restoredActivityAreas.length} 个活动区`);
     saveDb(db);
     return send(res, 200, { booths: restoredBooths, obstacles: restoredObstacles, activityAreas: restoredActivityAreas });
   }
 
   if (pathname === "/api/booths" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const eventId = db.settings.event.id;
     const boothNo = String(body.boothNo || `B${db.nextIds.booth}`).trim();
     const noError = boothNoValidationError(db, boothNo, eventId);
@@ -2906,7 +2915,7 @@ async function handleApi(req, res, url, body = {}) {
       area: Number(body.area || 9),
       widthM: Number(body.widthM || 3),
       depthM: Number(body.depthM || 3),
-      hall: body.hall || db.settings.halls[0] || "1鍙烽",
+      hall: body.hall || db.settings.halls[0] || "1号馆",
       zone: body.zone || zoneName(db.settings.zones[0]) || "A鍖?",
       attr: body.attr || "standard",
       price: 0,
@@ -2920,19 +2929,19 @@ async function handleApi(req, res, url, body = {}) {
     };
     refreshBoothBilling(db, booth);
     db.booths.push(booth);
-    writeLog(db, user, "缁樺埗灞曚綅", booth.boothNo, "booth", booth.id);
+    writeLog(db, user, "绘制展位", booth.boothNo, "booth", booth.id);
     saveDb(db);
     return send(res, 200, { booth });
   }
 
   const boothMatch = pathname.match(/^\/api\/booths\/(\d+)$/);
   if (boothMatch && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const booth = db.booths.find((item) => item.id === Number(boothMatch[1]) && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
-    if (!booth) return sendError(res, 404, "灞曚綅涓嶅瓨鍦?");
+    if (!booth) return sendError(res, 404, "展位不存在");
     if (!canAccessBoothDepartment(db, user, booth)) return sendError(res, 403, "该展位不属于当前部门，不能编辑");
-    if (booth.status === "sold") return sendError(res, 409, "宸叉垚浜ゅ睍浣嶄笉鍙洿鎺ョ紪杈?");
-    if (booth.locked && body.locked !== false) return sendError(res, 409, "灞曚綅宸查攣瀹氾紝璇峰厛瑙ｉ攣鍐嶇紪杈?");
+    if (booth.status === "sold") return sendError(res, 409, "已成交展位不可直接编辑");
+    if (booth.locked && body.locked !== false) return sendError(res, 409, "展位已锁定，请先解锁再编辑");
     if (body.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     if (body.boothNo !== undefined) {
       const boothNo = String(body.boothNo || "").trim();
@@ -2950,27 +2959,27 @@ async function handleApi(req, res, url, body = {}) {
     if (body.locked !== undefined) booth.locked = Boolean(body.locked);
     refreshBoothBilling(db, booth);
     booth.updatedAt = nowIso();
-    writeLog(db, user, "缂栬緫灞曚綅", booth.boothNo, "booth", booth.id);
+    writeLog(db, user, "编辑展位", booth.boothNo, "booth", booth.id);
     saveDb(db);
     return send(res, 200, { booth });
   }
 
   if (boothMatch && method === "DELETE") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const boothId = Number(boothMatch[1]);
     const booth = db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
-    if (!booth) return sendError(res, 404, "灞曚綅涓嶅瓨鍦?");
+    if (!booth) return sendError(res, 404, "展位不存在");
     if (!canAccessBoothDepartment(db, user, booth)) return sendError(res, 403, "不能删除其它部门展位");
-    if (!canDeleteBooth(db, booth)) return sendError(res, 409, "鍙兘鍒犻櫎绌洪棽鎴栧仠鐢ㄤ笖鏈璁㈠崟鍗犵敤鐨勫睍浣?");
+    if (!canDeleteBooth(db, booth)) return sendError(res, 409, "只能删除空闲或停用且未被订单占用的展位");
     db.booths = db.booths.filter((item) => item.id !== boothId);
     db.obstacles = db.obstacles.filter((obstacle) => Number(obstacle.boothId) !== boothId);
-    writeLog(db, user, "鍒犻櫎灞曚綅", booth.boothNo, "booth", booth.id);
+    writeLog(db, user, "删除展位", booth.boothNo, "booth", booth.id);
     saveDb(db);
     return send(res, 200, { deletedCount: 1 });
   }
 
   if (pathname === "/api/booths/batch" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
     const patch = body.patch || {};
     if (patch.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
@@ -3010,27 +3019,27 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/booths/delete" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const ids = [...new Set(Array.isArray(body.ids) ? body.ids.map(Number).filter(Boolean) : [])];
-    if (!ids.length) return sendError(res, 400, "璇烽€夋嫨瑕佸垹闄ょ殑灞曚綅");
+    if (!ids.length) return sendError(res, 400, "请选择要删除的展位");
     const booths = ids.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id))).filter(Boolean);
-    if (booths.length !== ids.length) return sendError(res, 404, "閮ㄥ垎灞曚綅涓嶅瓨鍦?");
+    if (booths.length !== ids.length) return sendError(res, 404, "部分展位不存在");
     const unauthorized = booths.filter((booth) => !canAccessBoothDepartment(db, user, booth));
     if (unauthorized.length) return sendError(res, 403, `不能删除其它部门展位：${unauthorized.map((booth) => booth.boothNo).join(" / ")}`);
     const blocked = booths.filter((booth) => !canDeleteBooth(db, booth));
     if (blocked.length) {
-      return sendError(res, 409, `瀛樺湪涓嶅彲鍒犻櫎灞曚綅锛?{blocked.map((booth) => booth.boothNo).join(" / ")}`);
+      return sendError(res, 409, `存在不可删除展位：${blocked.map((booth) => booth.boothNo).join(" / ")}`);
     }
     const deleteIds = new Set(ids);
     db.booths = db.booths.filter((booth) => !deleteIds.has(booth.id));
     db.obstacles = db.obstacles.filter((obstacle) => !deleteIds.has(Number(obstacle.boothId)));
-    writeLog(db, user, "鎵归噺鍒犻櫎灞曚綅", `${booths.length} 涓睍浣嶏細${booths.map((booth) => booth.boothNo).join(" / ")}`);
+    writeLog(db, user, "批量删除展位", `${booths.length} 个展位：${booths.map((booth) => booth.boothNo).join(" / ")}`);
     saveDb(db);
     return send(res, 200, { deletedCount: booths.length });
   }
 
   if (pathname === "/api/obstacles" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const type = body.type === "internal" ? "internal" : "external";
     const shape = body.shape === "circle" ? "circle" : "rect";
     const rect = {
@@ -3039,14 +3048,14 @@ async function handleApi(req, res, url, body = {}) {
       width: Number(body.width || 0),
       height: Number(body.height || 0)
     };
-    if (rect.width < 4 || rect.height < 4) return sendError(res, 400, "闅滅鐗╁昂瀵稿お灏?");
+    if (rect.width < 4 || rect.height < 4) return sendError(res, 400, "障碍物尺寸太小");
     let boothId = null;
     if (type === "internal") {
       const explicitBooth = body.boothId ? db.booths.find((booth) => booth.id === Number(body.boothId) && String(booth.eventId || db.settings.event.id) === String(db.settings.event.id)) : null;
       const booth = explicitBooth || eventBooths(db).find((item) => rectInsideBooth(rect, item));
-      if (!booth || !rectInsideBooth(rect, booth)) return sendError(res, 400, "灞曚綅鍐呴殰纰嶇墿蹇呴』瀹屾暣缁樺埗鍦ㄦ煇涓睍浣嶅唴閮?");
+      if (!booth || !rectInsideBooth(rect, booth)) return sendError(res, 400, "展位内障碍物必须完整绘制在某个展位内部");
       boothId = booth.id;
-      if (!["available", "disabled"].includes(booth.status)) return sendError(res, 409, "鍙兘缁欑┖闂叉垨鍋滅敤灞曚綅鏂板灞曚綅鍐呴殰纰嶇墿");
+      if (!["available", "disabled"].includes(booth.status)) return sendError(res, 409, "只能给空闲或停用展位新增展位内障碍物");
     }
     const scale = Math.max(1, Number(db.map.scalePxPerMeter || 16));
     const widthM = Number((rect.width / scale).toFixed(3));
@@ -3057,7 +3066,7 @@ async function handleApi(req, res, url, body = {}) {
       type,
       shape,
       boothId,
-      label: String(body.label || (type === "internal" ? "灞曚綅鍐呴殰纰嶇墿" : "灞曚綅澶栭殰纰嶇墿")).trim(),
+      label: String(body.label || (type === "internal" ? "展位内障碍物" : "展位外障碍物")).trim(),
       x: Math.round(rect.x),
       y: Math.round(rect.y),
       width: Math.round(rect.width),
@@ -3070,17 +3079,17 @@ async function handleApi(req, res, url, body = {}) {
     };
     db.obstacles.push(obstacle);
     if (boothId) refreshBoothBilling(db, db.booths.find((booth) => booth.id === boothId));
-    writeLog(db, user, "缁樺埗闅滅鐗?", `${obstacle.label}${boothId ? `锛岀粦瀹氬睍浣?${db.booths.find((booth) => booth.id === boothId)?.boothNo || ""}` : ""}`, "obstacle", obstacle.id);
+    writeLog(db, user, "绘制障碍物", `${obstacle.label}${boothId ? `，绑定展位${db.booths.find((booth) => booth.id === boothId)?.boothNo || ""}` : ""}`, "obstacle", obstacle.id);
     saveDb(db);
     return send(res, 200, { obstacle });
   }
 
   const obstacleMatch = pathname.match(/^\/api\/obstacles\/(\d+)$/);
   if (obstacleMatch && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const obstacleId = Number(obstacleMatch[1]);
     const obstacle = db.obstacles.find((item) => item.id === obstacleId && String(obstacleEventId(db, item)) === String(db.settings.event.id));
-    if (!obstacle) return sendError(res, 404, "闅滅鐗╀笉瀛樺湪");
+    if (!obstacle) return sendError(res, 404, "障碍物不存在");
     const scale = Math.max(1, Number(db.map.scalePxPerMeter || 16));
     const currentWidthM = obstacle.widthM !== undefined ? Number(obstacle.widthM || 0) : Number(obstacle.width || 0) / scale;
     const currentDepthM = obstacle.depthM !== undefined ? Number(obstacle.depthM || 0) : Number(obstacle.height || 0) / scale;
@@ -3089,18 +3098,18 @@ async function handleApi(req, res, url, body = {}) {
     const hasSizeChange = body.widthM !== undefined || body.depthM !== undefined || body.width !== undefined || body.height !== undefined;
     const widthM = body.widthM !== undefined ? Number(body.widthM) : (body.width !== undefined ? Number(body.width || 0) / scale : currentWidthM);
     const depthM = body.depthM !== undefined ? Number(body.depthM) : (body.height !== undefined ? Number(body.height || 0) / scale : currentDepthM);
-    if (!Number.isFinite(widthM) || !Number.isFinite(depthM) || widthM <= 0 || depthM <= 0) return sendError(res, 400, "璇峰～鍐欏ぇ浜?0 鐨勯殰纰嶇墿闀垮拰瀹?");
+    if (!Number.isFinite(widthM) || !Number.isFinite(depthM) || widthM <= 0 || depthM <= 0) return sendError(res, 400, "请填写大于 0 的障碍物长和宽");
     const next = {
       x: body.x !== undefined ? Number(body.x) : Number(obstacle.x || 0),
       y: body.y !== undefined ? Number(body.y) : Number(obstacle.y || 0),
       width: hasSizeChange ? Math.round(widthM * scale) : Math.round(Number(obstacle.width || 0)),
       height: hasSizeChange ? Math.round(depthM * scale) : Math.round(Number(obstacle.height || 0))
     };
-    if (next.width < 4 || next.height < 4) return sendError(res, 400, "闅滅鐗╁昂瀵稿お灏?");
+    if (next.width < 4 || next.height < 4) return sendError(res, 400, "障碍物尺寸太小");
     const booth = obstacle.boothId ? db.booths.find((item) => item.id === Number(obstacle.boothId)) : null;
     if (obstacle.type === "internal") {
-      if (!booth || !rectInsideBooth(next, booth)) return sendError(res, 400, "灞曚綅鍐呴殰纰嶇墿蹇呴』瀹屾暣淇濈暀鍦ㄧ粦瀹氬睍浣嶅唴閮?");
-      if (!["available", "disabled"].includes(booth.status)) return sendError(res, 409, "鍙兘璋冩暣绌洪棽鎴栧仠鐢ㄥ睍浣嶅唴鐨勯殰纰嶇墿");
+      if (!booth || !rectInsideBooth(next, booth)) return sendError(res, 400, "展位内障碍物必须完整保留在绑定展位内部");
+      if (!["available", "disabled"].includes(booth.status)) return sendError(res, 409, "只能调整空闲或停用展位内的障碍物");
     }
     obstacle.x = Math.round(next.x);
     obstacle.y = Math.round(next.y);
@@ -3114,25 +3123,25 @@ async function handleApi(req, res, url, body = {}) {
     }
     obstacle.updatedAt = nowIso();
     if (booth) refreshBoothBilling(db, booth);
-    writeLog(db, user, "缂栬緫闅滅鐗?", `${obstacle.label || obstacle.id} ${obstacle.width}x${obstacle.height}px`, "obstacle", obstacle.id);
+    writeLog(db, user, "编辑障碍物", `${obstacle.label || obstacle.id} ${obstacle.width}x${obstacle.height}px`, "obstacle", obstacle.id);
     saveDb(db);
     return send(res, 200, { obstacle });
   }
 
   if (obstacleMatch && method === "DELETE") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const obstacleId = Number(obstacleMatch[1]);
     const obstacle = db.obstacles.find((item) => item.id === obstacleId && String(obstacleEventId(db, item)) === String(db.settings.event.id));
-    if (!obstacle) return sendError(res, 404, "闅滅鐗╀笉瀛樺湪");
+    if (!obstacle) return sendError(res, 404, "障碍物不存在");
     db.obstacles = db.obstacles.filter((item) => item.id !== obstacleId);
     if (obstacle.boothId) refreshBoothBilling(db, db.booths.find((booth) => booth.id === Number(obstacle.boothId)));
-    writeLog(db, user, "鍒犻櫎闅滅鐗?", obstacle.label || String(obstacle.id), "obstacle", obstacle.id);
+    writeLog(db, user, "删除障碍物", obstacle.label || String(obstacle.id), "obstacle", obstacle.id);
     saveDb(db);
     return send(res, 200, { deletedCount: 1 });
   }
 
   if (pathname === "/api/activity-areas" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const rect = {
       x: Number(body.x || 0),
       y: Number(body.y || 0),
@@ -3159,7 +3168,7 @@ async function handleApi(req, res, url, body = {}) {
 
   const activityAreaMatch = pathname.match(/^\/api\/activity-areas\/(\d+)$/);
   if (activityAreaMatch && method === "PUT") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const areaId = Number(activityAreaMatch[1]);
     const area = db.activityAreas.find((item) => Number(item.id) === areaId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!area) return sendError(res, 404, "活动区不存在");
@@ -3177,7 +3186,7 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (activityAreaMatch && method === "DELETE") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const areaId = Number(activityAreaMatch[1]);
     const area = db.activityAreas.find((item) => Number(item.id) === areaId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!area) return sendError(res, 404, "活动区不存在");
@@ -3188,7 +3197,7 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/booths/generate-grid" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const created = generateBoothGrid(db, body);
     writeLog(db, user, "批量生成展位", `${created.length} 个展位`);
     saveDb(db);
@@ -3196,10 +3205,10 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/booths/clear" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const eventId = db.settings.event.id;
     if (db.orders.some((order) => String(order.eventId || eventId) === String(eventId) && isActiveOrder(order))) {
-      return sendError(res, 409, "瀛樺湪鏈粨鏉熻鍗曟椂涓嶈兘娓呯┖灞曚綅鍥?");
+      return sendError(res, 409, "存在未结束订单时不能清空展位图");
     }
     const currentBooths = eventBooths(db, eventId);
     const currentBoothIds = new Set(currentBooths.map((booth) => booth.id));
@@ -3237,7 +3246,7 @@ async function handleApi(req, res, url, body = {}) {
       lastLoginAt: null
     };
     db.users.push(newUser);
-    writeLog(db, user, "鍒涘缓璐﹀彿", `${newUser.displayName} (${newUser.role})`, "user", newUser.id);
+    writeLog(db, user, "创建账号", `${newUser.displayName} (${newUser.role})`, "user", newUser.id);
     saveDb(db);
     return send(res, 200, { user: sanitizeUser(newUser) });
   }
@@ -3264,7 +3273,7 @@ async function handleApi(req, res, url, body = {}) {
     Object.keys(db.sessions || {}).forEach((token) => {
       if (Number(db.sessions[token]?.userId) === targetUserId) delete db.sessions[token];
     });
-    writeLog(db, user, "鍒犻櫎璐﹀彿", `${targetUser.displayName || targetUser.username} (${targetUser.username})`, "user", targetUser.id);
+    writeLog(db, user, "删除账号", `${targetUser.displayName || targetUser.username} (${targetUser.username})`, "user", targetUser.id);
     saveDb(db);
     return send(res, 200, { ok: true });
   }
@@ -3276,7 +3285,7 @@ async function handleApi(req, res, url, body = {}) {
     if ((db.settings.departments || []).some((item) => item.name === name)) return sendError(res, 409, "部门已存在");
     const department = { id: id(db, "department"), name };
     db.settings.departments.push(department);
-    writeLog(db, user, "鏂板閮ㄩ棬", name, "department", department.id);
+    writeLog(db, user, "新增部门", name, "department", department.id);
     saveDb(db);
     return send(res, 200, { department });
   }
@@ -3290,7 +3299,7 @@ async function handleApi(req, res, url, body = {}) {
     if (!name) return sendError(res, 400, "请填写部门名称");
     if (db.settings.departments.some((item) => Number(item.id) !== Number(department.id) && item.name === name)) return sendError(res, 409, "部门已存在");
     department.name = name;
-    writeLog(db, user, "淇敼閮ㄩ棬", name, "department", department.id);
+    writeLog(db, user, "修改部门", name, "department", department.id);
     saveDb(db);
     return send(res, 200, { department });
   }
@@ -3308,7 +3317,7 @@ async function handleApi(req, res, url, body = {}) {
     db.booths.forEach((item) => {
       if (Number(item.departmentId || 0) === departmentId) item.departmentId = null;
     });
-    writeLog(db, user, "鍒犻櫎閮ㄩ棬", department.name, "department", department.id);
+    writeLog(db, user, "删除部门", department.name, "department", department.id);
     saveDb(db);
     return send(res, 200, { ok: true });
   }
@@ -3322,7 +3331,7 @@ async function handleApi(req, res, url, body = {}) {
     const departmentId = Number(body.departmentId || 0) || null;
     if (departmentId && !db.settings.departments.some((item) => Number(item.id) === departmentId)) return sendError(res, 404, "部门不存在");
     targetUser.departmentId = departmentId;
-    writeLog(db, user, "鍒嗛厤璐﹀彿閮ㄩ棬", `${targetUser.displayName} -> ${departmentId || "鏈垎閰?"}`, "user", targetUser.id);
+    writeLog(db, user, "分配账号部门", `${targetUser.displayName} -> ${departmentId || "未分配"}`, "user", targetUser.id);
     saveDb(db);
     return send(res, 200, { user: sanitizeUser(targetUser) });
   }
@@ -3406,7 +3415,7 @@ async function handleApi(req, res, url, body = {}) {
     };
     saveLeadContactVersion(db, lead, ownerSalesId, company);
     db.customerLeads.push(lead);
-    writeLog(db, user, "鏂板鏂板鎴?", company.name, "company", company.id);
+    writeLog(db, user, "新增新客户", company.name, "company", company.id);
     saveDb(db);
     return send(res, 200, { company, lead });
   }
@@ -3487,7 +3496,7 @@ async function handleApi(req, res, url, body = {}) {
         phone: nextPhone
       });
     }
-    writeLog(db, user, "淇敼鏂板鎴疯祫鏂?", company.name, "company", company.id);
+    writeLog(db, user, "修改新客户资料", company.name, "company", company.id);
     saveDb(db);
     return send(res, 200, { company, lead });
   }
@@ -3510,7 +3519,7 @@ async function handleApi(req, res, url, body = {}) {
     lead.claimedAt = nowIso();
     lead.publicReason = "";
     if (company) company.ownerSalesId = ownerSalesId;
-    writeLog(db, user, "璁ら鍏捣瀹㈡埛", company?.name || String(lead.companyId), "customerLead", lead.id);
+    writeLog(db, user, "认领公海客户", company?.name || String(lead.companyId), "customerLead", lead.id);
     saveDb(db);
     return send(res, 200, { lead });
   }
@@ -3529,22 +3538,22 @@ async function handleApi(req, res, url, body = {}) {
     lead.status = "public";
     lead.releasedAt = nowIso();
     lead.protectedUntil = "";
-    lead.publicReason = "涓诲姩涓嬩繚";
-    writeLog(db, user, "瀹㈡埛涓嬩繚", String(lead.companyId), "customerLead", lead.id);
+    lead.publicReason = "主动下保";
+    writeLog(db, user, "客户下保", String(lead.companyId), "customerLead", lead.id);
     saveDb(db);
     return send(res, 200, { lead });
   }
 
   const customerLeadFileReviewMatch = pathname.match(/^\/api\/customer-leads\/(\d+)\/(contract|voucher)\/review$/);
   if (customerLeadFileReviewMatch && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const lead = db.customerLeads.find((item) => item.id === Number(customerLeadFileReviewMatch[1]) && String(item.eventId) === String(db.settings.event.id));
-    if (!lead) return sendError(res, 404, "瀹㈡埛涓嶅瓨鍦?");
+    if (!lead) return sendError(res, 404, "客户不存在");
     const type = customerLeadFileReviewMatch[2];
     const status = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, status, body)) return;
     if (type === "contract") {
-      if (!(lead.contractAttachmentIds || []).length) return sendError(res, 400, "璇ュ鎴峰皻鏈笂浼犲悎鍚?");
+      if (!(lead.contractAttachmentIds || []).length) return sendError(res, 400, "该客户尚未上传合同");
       lead.contractReviewStatus = status;
       lead.contractReviewedBy = user.id;
       lead.contractReviewedAt = nowIso();
@@ -3554,10 +3563,10 @@ async function handleApi(req, res, url, body = {}) {
         extendActiveOrderReserve(db, lead, lead.voucherDueAt);
       } else {
         lead.voucherDueAt = "";
-        releaseLeadAndActiveOrder(db, lead, "鍚堝悓瀹℃牳椹冲洖", user);
+        releaseLeadAndActiveOrder(db, lead, "合同审核驳回", user);
       }
     } else {
-      if (!(lead.voucherAttachmentIds || []).length) return sendError(res, 400, "璇ュ鎴峰皻鏈笂浼犳按鍗?");
+      if (!(lead.voucherAttachmentIds || []).length) return sendError(res, 400, "该客户尚未上传水单");
       lead.voucherReviewStatus = status;
       lead.voucherReviewedBy = user.id;
       lead.voucherReviewedAt = nowIso();
@@ -3565,20 +3574,20 @@ async function handleApi(req, res, url, body = {}) {
       if (status === "approved") {
         markCustomerLeadConverted(db, lead.eventId, lead.companyId, lead.id);
       } else {
-        releaseLeadAndActiveOrder(db, lead, "姘村崟瀹℃牳椹冲洖", user);
+        releaseLeadAndActiveOrder(db, lead, "水单审核驳回", user);
       }
     }
     const company = db.companies.find((item) => item.id === lead.companyId);
-    writeLog(db, user, type === "contract" ? "瀹℃牳瀹㈡埛鍚堝悓" : "瀹℃牳瀹㈡埛姘村崟", `${company?.name || lead.companyId} ${status}`, "customerLead", lead.id);
+    writeLog(db, user, type === "contract" ? "审核客户合同" : "审核客户水单", `${company?.name || lead.companyId} ${status}`, "customerLead", lead.id);
     if (lead.ownerSalesId) {
-      notify(db, lead.ownerSalesId, type === "contract" ? "瀹㈡埛鍚堝悓瀹℃牳缁撴灉" : "瀹㈡埛姘村崟瀹℃牳缁撴灉", `${company?.name || "瀹㈡埛"} ${status === "approved" ? "宸查€氳繃" : "宸查┏鍥?"}`);
+      notify(db, lead.ownerSalesId, type === "contract" ? "客户合同审核结果" : "客户水单审核结果", `${company?.name || "客户"} ${status === "approved" ? "已通过" : "已驳回"}`);
     }
     saveDb(db);
     return send(res, 200, { lead });
   }
 
   if (pathname === "/api/orders" && method === "POST") {
-    if (!requireRole(user, ["admin", "sales"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin", "sales"])) return sendError(res, 403, "无权限");
     let companyId = Number(body.companyId || 0);
     const incomingCompanyName = String(body.company?.name || "").trim();
     const incomingTaxKey = companyTaxKey(body.company?.taxNo);
@@ -3652,7 +3661,7 @@ async function handleApi(req, res, url, body = {}) {
       eventName: db.settings.event.name,
       orderNo: orderNo(db),
       type,
-      title: body.title || (type === "booth" ? "灞曚綅璁㈠崟" : "鏃犲睍浣嶈嚜瀹氫箟璁㈠崟"),
+      title: body.title || (type === "booth" ? "展位订单" : "无展位自定义订单"),
       companyId,
       salespersonId,
       boothIds,
@@ -3684,8 +3693,8 @@ async function handleApi(req, res, url, body = {}) {
         booth.reservedBy = salespersonId;
       });
     }
-    writeLog(db, user, "鍒涘缓璁㈠崟骞堕鐣?", `${order.orderNo} ${company.name}`, "order", order.id);
-    notify(db, salespersonId, "璁㈠崟宸插垱寤?", `${order.orderNo} 宸查鐣欙紝闇€鍦?${db.settings.rules.reserveWorkdays} 涓?{deadlineDayModeText(db)}鍐呬笂浼犳按鍗曞苟杈惧埌棣栨姣斾緥`);
+    writeLog(db, user, "创建订单并预留", `${order.orderNo} ${company.name}`, "order", order.id);
+    notify(db, salespersonId, "订单已创建", `${order.orderNo} 已预留，需在 ${db.settings.rules.reserveWorkdays} 个${deadlineDayModeText(db)}内上传水单并达到首款比例`);
     saveDb(db);
     return send(res, 200, { order });
   }
@@ -3693,17 +3702,17 @@ async function handleApi(req, res, url, body = {}) {
   const orderPaymentMatch = pathname.match(/^\/api\/orders\/(\d+)\/payments$/);
   if (orderPaymentMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(orderPaymentMatch[1]));
-    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "鏃犳潈闄?");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
     const leadForOrder = db.customerLeads.find((lead) => String(lead.eventId) === String(order.eventId) && Number(lead.companyId) === Number(order.companyId));
     if (leadForOrder && salesFlowMode(db) === "contract_first" && leadForOrder.contractReviewStatus !== "approved") {
-      return sendError(res, 409, "褰撳墠閿€鍞祦绋嬭姹傚悎鍚屽鏍搁€氳繃鍚庢墠鑳戒笂浼犳按鍗?");
+      return sendError(res, 409, "当前销售流程要求合同审核通过后才能上传水单");
     }
     if (leadForOrder && salesFlowMode(db) === "contract_first") {
       const due = new Date(leadForOrder.voucherDueAt || 0).getTime();
-      if (Number.isFinite(due) && due <= Date.now()) return sendError(res, 409, "鍚堝悓閫氳繃鍚庣殑姘村崟涓婁紶鏈熼檺宸茶繃");
+      if (Number.isFinite(due) && due <= Date.now()) return sendError(res, 409, "合同通过后的水单上传期限已过");
     }
     const amount = Number(body.amount || 0);
-    if (amount <= 0) return sendError(res, 400, "鏀舵閲戦蹇呴』澶т簬 0");
+    if (amount <= 0) return sendError(res, 400, "收款金额必须大于 0");
     const payment = {
       id: id(db, "payment"),
       orderId: order.id,
@@ -3721,7 +3730,7 @@ async function handleApi(req, res, url, body = {}) {
     };
     db.payments.push(payment);
     recalcOrder(db, order);
-    writeLog(db, user, "鎻愪氦姘村崟瀹℃牳", `${order.orderNo} 閲戦 ${amount}`, "payment", payment.id);
+    writeLog(db, user, "提交水单审核", `${order.orderNo} 金额 ${amount}`, "payment", payment.id);
     eventAdminUsers(db, order.eventId).forEach((admin) => notify(db, admin.id, "待审核水单", `${order.orderNo} 提交了 ${amount} 元水单`));
     saveDb(db);
     return send(res, 200, { payment, order });
@@ -3729,9 +3738,9 @@ async function handleApi(req, res, url, body = {}) {
 
   const paymentReviewMatch = pathname.match(/^\/api\/payments\/(\d+)\/review$/);
   if (paymentReviewMatch && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const payment = db.payments.find((item) => item.id === Number(paymentReviewMatch[1]));
-    if (!payment) return sendError(res, 404, "姘村崟涓嶅瓨鍦?");
+    if (!payment) return sendError(res, 404, "水单不存在");
     const order = db.orders.find((item) => item.id === payment.orderId);
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
@@ -3744,11 +3753,11 @@ async function handleApi(req, res, url, body = {}) {
       markCustomerLeadConverted(db, order.eventId, order.companyId);
     } else {
       const lead = activeLeadForOrder(db, order);
-      if (lead) releaseLeadToPublic(db, lead, "姘村崟瀹℃牳椹冲洖", user);
-      releaseOrderBooths(db, order, "姘村崟瀹℃牳椹冲洖", user);
+      if (lead) releaseLeadToPublic(db, lead, "水单审核驳回", user);
+      releaseOrderBooths(db, order, "水单审核驳回", user);
     }
-    writeLog(db, user, payment.status === "approved" ? "瀹℃牳閫氳繃姘村崟" : "椹冲洖姘村崟", `${order.orderNo} ${payment.amount}`, "payment", payment.id);
-    notify(db, order.salespersonId, "姘村崟瀹℃牳缁撴灉", `${order.orderNo} ${payment.status === "approved" ? "瀹℃牳閫氳繃" : "宸查┏鍥?"}`);
+    writeLog(db, user, payment.status === "approved" ? "审核通过水单" : "驳回水单", `${order.orderNo} ${payment.amount}`, "payment", payment.id);
+    notify(db, order.salespersonId, "水单审核结果", `${order.orderNo} ${payment.status === "approved" ? "审核通过" : "已驳回"}`);
     saveDb(db);
     return send(res, 200, { payment, order });
   }
@@ -3756,11 +3765,11 @@ async function handleApi(req, res, url, body = {}) {
   const enterpriseAccountMatch = pathname.match(/^\/api\/orders\/(\d+)\/enterprise-account$/);
   if (enterpriseAccountMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(enterpriseAccountMatch[1]));
-    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "鏃犳潈闄?");
-    if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "鍙湁鎴愪氦鐨勫睍浣嶈鍗曞彲浠ョ敓鎴愪紒涓氳处鍙?");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "只有成交的展位订单可以生成企业账号");
     const password = simpleEnterprisePassword();
     const enterpriseUser = ensureEnterpriseUserForOrder(db, order, password);
-    writeLog(db, user, "鐢熸垚浼佷笟璐﹀彿", `${order.orderNo} ${enterpriseUser.username}`, "user", enterpriseUser.id);
+    writeLog(db, user, "生成企业账号", `${order.orderNo} ${enterpriseUser.username}`, "user", enterpriseUser.id);
     saveDb(db);
     return send(res, 200, { username: enterpriseUser.username, password });
   }
@@ -3768,8 +3777,8 @@ async function handleApi(req, res, url, body = {}) {
   const enterpriseLinkMatch = pathname.match(/^\/api\/orders\/(\d+)\/enterprise-link$/);
   if (enterpriseLinkMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(enterpriseLinkMatch[1]));
-    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "鏃犳潈闄?");
-    if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "鍙湁鎴愪氦鐨勫睍浣嶈鍗曞彲浠ョ敓鎴愪紒涓氬厤鐧诲綍閾炬帴");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
+    if (order.type !== "booth" || order.status !== "sold") return sendError(res, 409, "只有成交的展位订单可以生成企业免登录链接");
     const eventLinkDefaultDays = enterpriseLinkMaxDays(db);
     const days = clampEnterpriseLinkDays(db, body.days || db.settings.rules.enterpriseLinkDays || eventLinkDefaultDays);
     const enterpriseUser = ensureEnterpriseUserForOrder(db, order);
@@ -3780,7 +3789,7 @@ async function handleApi(req, res, url, body = {}) {
     const protocol = String(req.headers["x-forwarded-proto"] || "http").split(",")[0];
     const host = req.headers.host || `localhost:${PORT}`;
     const link = `${protocol}://${host}/?enterpriseToken=${encodeURIComponent(order.enterpriseAccessToken)}`;
-    writeLog(db, user, "鐢熸垚浼佷笟鍏嶇櫥褰曢摼鎺?", `${order.orderNo} ${days} 澶╂湁鏁坄, "user"`, enterpriseUser.id);
+    writeLog(db, user, "生成企业免登录链接", `${order.orderNo} ${days} 天有效`, "user", enterpriseUser.id);
     saveDb(db);
     return send(res, 200, { link, expiresAt: order.enterpriseAccessExpiresAt, username: enterpriseUser.username });
   }
@@ -3788,11 +3797,11 @@ async function handleApi(req, res, url, body = {}) {
   const changeRequestMatch = pathname.match(/^\/api\/orders\/(\d+)\/change-requests$/);
   if (changeRequestMatch && method === "POST") {
     const order = db.orders.find((item) => item.id === Number(changeRequestMatch[1]));
-    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "鏃犳潈闄?");
+    if (!canAccessOrder(db, user, order) || user.role === "enterprise") return sendError(res, 403, "无权限");
     const request = {
       id: id(db, "changeRequest"),
       orderId: order.id,
-      type: body.type || "璁㈠崟鍙樻洿",
+      type: body.type || "订单变更",
       detail: body.detail || "",
       changeData: {
         action: body.action || "manual",
@@ -3807,50 +3816,50 @@ async function handleApi(req, res, url, body = {}) {
       reviewRemark: ""
     };
     if (request.changeData.action === "change_booth") {
-      if (order.type !== "booth") return sendError(res, 409, "鏃犲睍浣嶈鍗曚笉鑳芥洿鎹㈠睍浣?");
-      if (!request.changeData.boothIds.length) return sendError(res, 400, "璇烽€夋嫨鏂扮殑灞曚綅");
+      if (order.type !== "booth") return sendError(res, 409, "无展位订单不能更换展位");
+      if (!request.changeData.boothIds.length) return sendError(res, 400, "请选择新的展位");
     const booths = request.changeData.boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || order.eventId) === String(order.eventId)));
-      if (booths.some((booth) => !booth)) return sendError(res, 404, "鏂板睍浣嶄笉瀛樺湪");
-      if (booths.some((booth) => booth.status !== "available")) return sendError(res, 409, "鏂板睍浣嶅凡琚崰鐢?");
+      if (booths.some((booth) => !booth)) return sendError(res, 404, "新展位不存在");
+      if (booths.some((booth) => booth.status !== "available")) return sendError(res, 409, "新展位已被占用");
       if (booths.some((booth) => !canAccessBoothDepartment(db, user, booth))) return sendError(res, 403, "所选展位不属于当前部门，不能申请更换");
-      request.detail = request.detail || `鏇存崲灞曚綅锛?{order.boothSnapshot.map((booth) => booth.boothNo).join(" / ")} -> ${booths.map((booth) => booth.boothNo).join(" / ")}`;
+      request.detail = request.detail || `更换展位：${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ")} -> ${booths.map((booth) => booth.boothNo).join(" / ")}`;
     }
     if (request.changeData.action === "cancel_order") {
-      if (isClosedOrderStatus(order.status)) return sendError(res, 409, "璁㈠崟宸茬粡缁撴潫");
-      request.detail = request.detail || `閫€璁㈠睍浣嶏細${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ") || order.orderNo}`;
+      if (isClosedOrderStatus(order.status)) return sendError(res, 409, "订单已经结束");
+      request.detail = request.detail || `退订展位：${order.boothSnapshot.map((booth) => booth.boothNo).join(" / ") || order.orderNo}`;
     }
     if (request.changeData.action === "special_order") {
-      if (user.role !== "sales") return sendError(res, 403, "鍙湁涓氬姟鍛樺彲浠ユ彁浜ょ壒娈婅鍗曠敵璇?");
-      if (!isActiveOrder(order) || order.status === "sold") return sendError(res, 409, "璁㈠崟宸茬粡鎴愪氦鎴栫粨鏉燂紝涓嶈兘鐢宠鐗规畩璁㈠崟");
-      if (order.specialApproved) return sendError(res, 409, "璇ヨ鍗曞凡缁忔槸鐗规畩璁㈠崟");
-      if (Number(order.totalAmount || 0) <= 0) return sendError(res, 409, "璁㈠崟閲戦涓?0锛屼笉鑳界敵璇风壒娈婅鍗?");
+      if (user.role !== "sales") return sendError(res, 403, "只有业务员可以提交特殊订单申请");
+      if (!isActiveOrder(order) || order.status === "sold") return sendError(res, 409, "订单已经成交或结束，不能申请特殊订单");
+      if (order.specialApproved) return sendError(res, 409, "该订单已经是特殊订单");
+      if (Number(order.totalAmount || 0) <= 0) return sendError(res, 409, "订单金额为 0，不能申请特殊订单");
       const exists = db.changeRequests.some((item) => (
         item.orderId === order.id
         && item.status === "pending"
         && item.changeData?.action === "special_order"
       ));
-      if (exists) return sendError(res, 409, "璇ヨ鍗曞凡鏈夊緟瀹℃牳鐗规畩璁㈠崟鐢宠");
-      request.type = "鐗规畩璁㈠崟鐢宠";
-      request.detail = request.detail || "瀹㈡埛浠樻杩涘害杈冩參锛岀敵璇风壒娈婃垚浜?";
+      if (exists) return sendError(res, 409, "该订单已有待审核特殊订单申请");
+      request.type = "特殊订单申请";
+      request.detail = request.detail || "客户付款进度较慢，申请特殊成交";
     }
     db.changeRequests.push(request);
-    writeLog(db, user, "鎻愪氦璁㈠崟鍙樻洿鐢宠", `${order.orderNo} ${request.type}`, "order", order.id);
-    eventAdminUsers(db, order.eventId).forEach((admin) => notify(db, admin.id, "寰呭鏍歌鍗曞彉鏇?", `${order.orderNo} ${request.type}`));
+    writeLog(db, user, "提交订单变更申请", `${order.orderNo} ${request.type}`, "order", order.id);
+    eventAdminUsers(db, order.eventId).forEach((admin) => notify(db, admin.id, "待审核订单变更", `${order.orderNo} ${request.type}`));
     saveDb(db);
     return send(res, 200, { request });
   }
 
   const changeReviewMatch = pathname.match(/^\/api\/change-requests\/(\d+)\/review$/);
   if (changeReviewMatch && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const request = db.changeRequests.find((item) => item.id === Number(changeReviewMatch[1]));
-    if (!request) return sendError(res, 404, "鐢宠涓嶅瓨鍦?");
-    if (request.status !== "pending") return sendError(res, 409, "鐢宠宸茬粡澶勭悊");
+    if (!request) return sendError(res, 404, "申请不存在");
+    if (request.status !== "pending") return sendError(res, 409, "申请已经处理");
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
     if (nextStatus === "approved") {
       const result = applyChangeRequest(db, request);
-      if (!result.ok) return sendError(res, result.status || 409, result.error || "鍙樻洿鏃犳硶鎵ц");
+      if (!result.ok) return sendError(res, result.status || 409, result.error || "变更无法执行");
       request.appliedDetail = result.detail;
     }
     request.status = nextStatus;
@@ -3861,15 +3870,15 @@ async function handleApi(req, res, url, body = {}) {
       const order = db.orders.find((item) => item.id === request.orderId);
       if (order) order.specialApprovedBy = user.id;
     }
-    writeLog(db, user, "瀹℃牳璁㈠崟鍙樻洿鐢宠", `${request.type} ${request.status}`, "changeRequest", request.id);
+    writeLog(db, user, "审核订单变更申请", `${request.type} ${request.status}`, "changeRequest", request.id);
     const order = db.orders.find((item) => item.id === request.orderId);
-    if (order) notify(db, order.salespersonId, "璁㈠崟鍙樻洿瀹℃牳缁撴灉", `${order.orderNo} ${request.type} ${request.status === "approved" ? "宸查€氳繃" : "宸查┏鍥?"}`);
+    if (order) notify(db, order.salespersonId, "订单变更审核结果", `${order.orderNo} ${request.type} ${request.status === "approved" ? "已通过" : "已驳回"}`);
     saveDb(db);
     return send(res, 200, { request });
   }
 
   if (pathname === "/api/jobs/release" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const jobLeadsChanged = syncCustomerLeadsForCurrentEvent(db);
     const released = releaseExpiredOrders(db, user);
     saveDb(db);
@@ -3877,21 +3886,21 @@ async function handleApi(req, res, url, body = {}) {
   }
 
   if (pathname === "/api/exhibitor/profile" && method === "PUT") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "浼佷笟璐﹀彿鎵嶅彲鎻愪氦灞曞姟璧勬枡");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "企业账号才可提交展务资料");
     const order = db.orders.find((item) => item.id === user.orderId && item.status === "sold");
-    if (!order) return sendError(res, 409, "璁㈠崟灏氭湭鎴愪氦鎴栦笉瀛樺湪");
+    if (!order) return sendError(res, 409, "订单尚未成交或不存在");
     const profile = ensureProfile(db, order);
     profile.catalog = { ...profile.catalog, ...(body.catalog || {}) };
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鏇存柊浼佷笟浼氬垔璧勬枡", order.orderNo, "profile", profile.id);
+    writeLog(db, user, "更新企业会刊资料", order.orderNo, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   if (pathname === "/api/exhibitor/badges" && method === "POST") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const order = db.orders.find((item) => item.id === user.orderId && item.status === "sold");
-    if (!order) return sendError(res, 409, "璁㈠崟灏氭湭鎴愪氦鎴栦笉瀛樺湪");
+    if (!order) return sendError(res, 409, "订单尚未成交或不存在");
     const profile = ensureProfile(db, order);
     profile.badges.push({
       id: randomToken(6),
@@ -3902,45 +3911,45 @@ async function handleApi(req, res, url, body = {}) {
       createdAt: nowIso()
     });
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鎻愪氦鍙傚睍璇佷俊鎭?", `${body.name || ""}`, "profile", profile.id);
+    writeLog(db, user, "提交参展证信息", `${body.name || ""}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   const badgeDeleteMatch = pathname.match(/^\/api\/exhibitor\/badges\/([a-f0-9]+)$/);
   if (badgeDeleteMatch && method === "DELETE") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const profile = db.profiles.find((item) => item.orderId === user.orderId);
-    if (!profile) return sendError(res, 404, "璧勬枡涓嶅瓨鍦?");
+    if (!profile) return sendError(res, 404, "资料不存在");
     const badge = profile.badges.find((item) => item.id === badgeDeleteMatch[1]);
-    if (!badge) return sendError(res, 404, "鍙傚睍璇佷笉瀛樺湪");
+    if (!badge) return sendError(res, 404, "参展证不存在");
     profile.badges = profile.badges.filter((item) => item.id !== badgeDeleteMatch[1]);
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鍒犻櫎鍙傚睍璇佷俊鎭?", `${badge.name || ""}`, "profile", profile.id);
+    writeLog(db, user, "删除参展证信息", `${badge.name || ""}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   if (pathname === "/api/exhibitor/fascia" && method === "POST") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const order = db.orders.find((item) => item.id === user.orderId && item.status === "sold");
-    if (!order) return sendError(res, 409, "璁㈠崟灏氭湭鎴愪氦鎴栦笉瀛樺湪");
+    if (!order) return sendError(res, 409, "订单尚未成交或不存在");
     const profile = ensureProfile(db, order);
     profile.fascia.requestedName = body.requestedName || "";
     profile.fascia.status = profile.fascia.requestedName ? "pending" : "default";
     profile.fascia.reviewRemark = "";
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鎻愪氦妤ｆ澘淇敼", profile.fascia.requestedName, "profile", profile.id);
+    writeLog(db, user, "提交楣板修改", profile.fascia.requestedName, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   if (pathname === "/api/exhibitor/rentals" && method === "POST") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const order = db.orders.find((item) => item.id === user.orderId && item.status === "sold");
-    if (!order) return sendError(res, 409, "璁㈠崟灏氭湭鎴愪氦鎴栦笉瀛樺湪");
+    if (!order) return sendError(res, 409, "订单尚未成交或不存在");
     const furniture = db.settings.furniture.find((item) => item.id === body.furnitureId);
-    if (!furniture) return sendError(res, 404, "灞曞叿涓嶅瓨鍦?");
+    if (!furniture) return sendError(res, 404, "展具不存在");
     const profile = ensureProfile(db, order);
     profile.rentals.push({
       id: randomToken(6),
@@ -3952,30 +3961,30 @@ async function handleApi(req, res, url, body = {}) {
       createdAt: nowIso()
     });
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鎻愪氦灞曞叿澧炵", `${furniture.name} x ${body.qty || 1}`, "profile", profile.id);
+    writeLog(db, user, "提交展具增租", `${furniture.name} x ${body.qty || 1}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   const rentalDeleteMatch = pathname.match(/^\/api\/exhibitor\/rentals\/([a-f0-9]+)$/);
   if (rentalDeleteMatch && method === "DELETE") {
-    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["enterprise"])) return sendError(res, 403, "无权限");
     const profile = db.profiles.find((item) => item.orderId === user.orderId);
-    if (!profile) return sendError(res, 404, "璧勬枡涓嶅瓨鍦?");
+    if (!profile) return sendError(res, 404, "资料不存在");
     const rental = profile.rentals.find((item) => item.id === rentalDeleteMatch[1]);
-    if (!rental) return sendError(res, 404, "灞曞叿澧炵鐢宠涓嶅瓨鍦?");
+    if (!rental) return sendError(res, 404, "展具增租申请不存在");
     profile.rentals = profile.rentals.filter((item) => item.id !== rentalDeleteMatch[1]);
     profile.updatedAt = nowIso();
-    writeLog(db, user, "鍒犻櫎灞曞叿澧炵", `${rental.furnitureName} x ${rental.qty}`, "profile", profile.id);
+    writeLog(db, user, "删除展具增租", `${rental.furnitureName} x ${rental.qty}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   const fasciaReviewMatch = pathname.match(/^\/api\/exhibitor\/fascia\/(\d+)\/review$/);
   if (fasciaReviewMatch && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const profile = db.profiles.find((item) => item.id === Number(fasciaReviewMatch[1]));
-    if (!profile) return sendError(res, 404, "璧勬枡涓嶅瓨鍦?");
+    if (!profile) return sendError(res, 404, "资料不存在");
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
     profile.fascia.status = nextStatus;
@@ -3983,18 +3992,18 @@ async function handleApi(req, res, url, body = {}) {
     profile.fascia.reviewedBy = user.id;
     profile.fascia.reviewedAt = nowIso();
     profile.updatedAt = nowIso();
-    writeLog(db, user, "瀹℃牳妤ｆ澘淇敼", profile.fascia.status, "profile", profile.id);
+    writeLog(db, user, "审核楣板修改", profile.fascia.status, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
 
   const rentalReviewMatch = pathname.match(/^\/api\/exhibitor\/rentals\/(\d+)\/([a-f0-9]+)\/review$/);
   if (rentalReviewMatch && method === "POST") {
-    if (!requireRole(user, ["admin"])) return sendError(res, 403, "鏃犳潈闄?");
+    if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const profile = db.profiles.find((item) => item.id === Number(rentalReviewMatch[1]));
-    if (!profile) return sendError(res, 404, "璧勬枡涓嶅瓨鍦?");
+    if (!profile) return sendError(res, 404, "资料不存在");
     const rental = profile.rentals.find((item) => item.id === rentalReviewMatch[2]);
-    if (!rental) return sendError(res, 404, "灞曞叿鐢宠涓嶅瓨鍦?");
+    if (!rental) return sendError(res, 404, "展具申请不存在");
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
     rental.status = nextStatus;
@@ -4002,7 +4011,7 @@ async function handleApi(req, res, url, body = {}) {
     rental.reviewedBy = user.id;
     rental.reviewedAt = nowIso();
     profile.updatedAt = nowIso();
-    writeLog(db, user, "瀹℃牳灞曞叿澧炵", `${rental.furnitureName} ${rental.status}`, "profile", profile.id);
+    writeLog(db, user, "审核展具增租", `${rental.furnitureName} ${rental.status}`, "profile", profile.id);
     saveDb(db);
     return send(res, 200, { profile });
   }
@@ -4091,7 +4100,7 @@ async function handleApi(req, res, url, body = {}) {
     return undefined;
   }
 
-  return sendError(res, 404, "鎺ュ彛涓嶅瓨鍦?");
+  return sendError(res, 404, "接口不存在");
 }
 
 const server = http.createServer(async (req, res) => {
@@ -4113,7 +4122,7 @@ const server = http.createServer(async (req, res) => {
     return serveFile(res, filePath);
   } catch (error) {
     console.error(error);
-    return sendError(res, 500, error.message || "鏈嶅姟鍣ㄩ敊璇?");
+    return sendError(res, 500, error.message || "服务器错误");
   }
 });
 
@@ -4134,3 +4143,10 @@ server.listen(PORT, () => {
     runWorkflowMaintenance().catch((error) => console.error("workflow maintenance failed", error));
   }, 10 * 60 * 1000);
 });
+
+
+
+
+
+
+
