@@ -846,6 +846,27 @@ label {
   min-width: 130px;
 }
 
+.toolbar-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
+.batch-toolbar {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+
+.batch-toolbar label {
+  min-width: 118px;
+}
+
+.batch-toolbar .clear-map-button {
+  margin-left: auto;
+}
+
 .map-toolbar-section {
   position: sticky;
   top: 84px;
@@ -870,6 +891,7 @@ label {
   display: grid;
   grid-template-columns: 1fr 320px;
   gap: 16px;
+  align-items: start;
 }
 
 .map-frame {
@@ -882,6 +904,10 @@ label {
   position: relative;
   user-select: none;
   -webkit-user-select: none;
+}
+
+#admin-map-frame {
+  min-height: 260px;
 }
 
 .booth-svg {
@@ -1139,6 +1165,17 @@ body.map-interacting {
   height: calc(100vh - 300px);
   min-height: 440px;
   margin-bottom: 16px;
+  cursor: grab;
+}
+
+.sales-map-frame.is-panning {
+  cursor: grabbing;
+}
+
+.sales-map-pan-surface {
+  display: inline-block;
+  min-width: 100%;
+  min-height: 100%;
 }
 
 .sales-booth-rect {
