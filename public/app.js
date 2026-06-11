@@ -228,6 +228,7 @@ const App = (() => {
   function statusText(status) {
     return {
       available: "空闲",
+      competitive: "可竞争",
       reserved: "已预留",
       pending_payment_review: "待审款",
       sold: "已首款成交",
@@ -2907,8 +2908,9 @@ const App = (() => {
     const totalBoothCount = boothEquivalentCount(booths);
     const filteredBoothCount = boothEquivalentCount(filteredBooths);
     const matchedBoothCount = boothEquivalentCount(matchedBooths);
-    const availableCount = boothEquivalentCount(booths.filter(isBoothOrderable));
-    const reservedCount = boothEquivalentCount(booths.filter((booth) => booth.status === "reserved"));
+    const availableCount = boothEquivalentCount(booths.filter((booth) => booth.status === "available"));
+    const competitiveCount = boothEquivalentCount(booths.filter(isCompetitiveBooth));
+    const reservedCount = boothEquivalentCount(booths.filter((booth) => ["reserved", "pending_payment_review"].includes(booth.status) && !isCompetitiveBooth(booth)));
     const soldCount = boothEquivalentCount(booths.filter((booth) => booth.status === "sold"));
     const countText = state.salesMapStatus
       ? `${formatCount(matchedBoothCount)} 个匹配 / ${formatCount(filteredBoothCount)} 个显示`
@@ -2920,7 +2922,8 @@ const App = (() => {
           <span class="count-pill">${countText}</span>
         </div>
         <div class="sales-map-summary">
-          <div><strong>${formatCount(availableCount)}</strong><span>可选展位</span></div>
+          <div><strong>${formatCount(availableCount)}</strong><span>空闲展位</span></div>
+          <div><strong>${formatCount(competitiveCount)}</strong><span>可竞争</span></div>
           <div><strong>${formatCount(reservedCount)}</strong><span>已预留</span></div>
           <div><strong>${formatCount(soldCount)}</strong><span>首款成交</span></div>
         </div>
@@ -2936,7 +2939,7 @@ const App = (() => {
           </select></label>
           <label>展位状态<select onchange="App.setSalesMapFilter('status', this.value)">
             <option value="">全部状态</option>
-            ${["available", "reserved", "pending_payment_review", "sold", "disabled"].map((status) => `<option value="${status}" ${state.salesMapStatus === status ? "selected" : ""}>${statusText(status)}</option>`).join("")}
+            ${salesMapStatusOptions().map((status) => `<option value="${status}" ${state.salesMapStatus === status ? "selected" : ""}>${statusText(status)}</option>`).join("")}
           </select></label>
           <button class="${state.salesMapOnlyAvailable ? "success" : "secondary"}" onclick="App.toggleSalesMapAvailable()">可选展位</button>
           <div class="search-control">
@@ -2953,11 +2956,11 @@ const App = (() => {
         </div>
       </section>
       <section class="section">
-        <h2>展区颜色</h2>
+        <h2>展位状态颜色</h2>
         <div class="zone-legend">
-          ${zones.map((zone) => `<span><i style="background:${h(zone.color)}"></i>${h(zone.name)}</span>`).join("")}
+          ${salesMapStatusLegendItems().map((item) => `<span><i style="background:${item.color}"></i>${h(item.label)}</span>`).join("")}
         </div>
-        <p class="hint">鼠标放到展位上可查看展位号、类型、展区、价格、状态；已预留展位会显示预留倒计时。</p>
+        <p class="hint">鼠标放到展位上可查看展位号、类型、展区、价格、状态；预留到期且允许竞争的展位会显示为“可竞争”。</p>
       </section>
     `;
   }
@@ -2971,13 +2974,13 @@ const App = (() => {
   }
 
   function salesMapMatchedBooths() {
-    return filteredSalesMapBooths().filter((booth) => !state.salesMapStatus || booth.status === state.salesMapStatus);
+    return filteredSalesMapBooths().filter((booth) => !state.salesMapStatus || boothSalesMapStatus(booth) === state.salesMapStatus);
   }
 
   function salesMapBoothDimmed(booth) {
     if (state.salesMapZone && booth.zone !== state.salesMapZone) return true;
     if (state.salesMapAttr && booth.attr !== state.salesMapAttr) return true;
-    if (state.salesMapStatus && booth.status !== state.salesMapStatus) return true;
+    if (state.salesMapStatus && boothSalesMapStatus(booth) !== state.salesMapStatus) return true;
     if (state.salesMapOnlyAvailable && !isBoothOrderable(booth)) return true;
     return false;
   }
@@ -2994,12 +2997,13 @@ const App = (() => {
       const focused = state.salesMapFocusId === booth.id;
       const available = isBoothOrderable(booth);
       const grayed = salesMapBoothDimmed(booth);
-      const fill = grayed ? "#c9d1dc" : zoneColor(booth.zone);
+      const status = boothSalesMapStatus(booth);
+      const fill = salesMapBoothFill(booth, grayed);
       const textVisible = booth.width >= 32 && booth.height >= 22;
       return `
         <g data-booth-id="${booth.id}" class="sales-booth-group">
           <title>${h(salesBoothTooltip(booth))}</title>
-          <rect class="sales-booth-rect ${available ? "available" : "unavailable"} ${focused ? "focused" : ""}" fill="${h(fill)}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
+          <rect class="sales-booth-rect ${available ? "available" : "unavailable"} ${status === "competitive" ? "competitive" : ""} ${focused ? "focused" : ""}" fill="${h(fill)}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
           ${textVisible ? boothMapLabelSvg(booth) : ""}
         </g>
       `;
@@ -3069,7 +3073,7 @@ const App = (() => {
       `计价面积：${Number(booth.billableArea || booth.area || 0)}㎡`,
       `障碍面积：${Number(booth.obstacleArea || 0)}㎡`,
       `展位价格：${money(booth.price)}`,
-      `展位状态：${order ? orderDisplayStatusText(order) : statusText(booth.status)}`
+      `展位状态：${statusText(boothSalesMapStatus(booth))}`
     ];
     const countdown = reserveCountdown(booth);
     if (countdown) lines.push(`预留倒计时：${countdown}`);
@@ -3122,6 +3126,39 @@ const App = (() => {
 
   function isBoothOrderable(booth) {
     return Boolean(booth && !booth.locked && (booth.status === "available" || isCompetitiveBooth(booth)));
+  }
+
+  function hasCompetitiveBoothRuleLock() {
+    return (state.data?.booths || []).some(isCompetitiveBooth);
+  }
+
+  function boothSalesMapStatus(booth) {
+    return isCompetitiveBooth(booth) ? "competitive" : (booth?.status || "available");
+  }
+
+  function salesMapStatusOptions() {
+    return ["available", "competitive", "reserved", "pending_payment_review", "sold", "disabled"];
+  }
+
+  function salesMapStatusLegendItems() {
+    return [
+      { label: statusText("available"), color: "#18a058" },
+      { label: statusText("competitive"), color: "#0f9f8f" },
+      { label: "已预留/待审款", color: "#e6a23c" },
+      { label: statusText("sold"), color: "#5c6ac4" },
+      { label: statusText("disabled"), color: "#7c8797" }
+    ];
+  }
+
+  function salesMapBoothFill(booth, grayed = false) {
+    if (grayed) return "#c9d1dc";
+    const status = boothSalesMapStatus(booth);
+    if (status === "available") return "#18a058";
+    if (status === "competitive") return "#0f9f8f";
+    if (status === "reserved" || status === "pending_payment_review") return "#e6a23c";
+    if (status === "sold") return "#5c6ac4";
+    if (status === "disabled") return "#7c8797";
+    return zoneColor(booth.zone);
   }
 
   function activeOrderForBooth(booth) {
@@ -3490,6 +3527,7 @@ const App = (() => {
     const canEditAdminContactMask = isSuperAdminRole(state.data.me.role);
     const deadlineDayMode = rules.deadlineDayMode === "natural" ? "natural" : "workday";
     const deadlineDayModeText = deadlineDayMode === "natural" ? "自然日" : "工作日";
+    const releaseExpiredLocked = hasCompetitiveBoothRuleLock();
     return `
       ${settingsTabNav()}
       <section class="section ${settingsTabClass("workflow")}">
@@ -3503,10 +3541,10 @@ const App = (() => {
             <option value="natural" ${deadlineDayMode === "natural" ? "selected" : ""}>自然日</option>
           </select></label>
           <label>预留有效天数（${deadlineDayModeText}）<input id="rule-workdays" type="number" value="${rules.reserveWorkdays ?? 7}"></label>
-          <label>到期展位是否放开<select id="rule-release-expired-booths" onchange="App.salesFlowRuleChanged()">
+          <label>到期展位是否放开<select id="rule-release-expired-booths" onchange="App.salesFlowRuleChanged()" ${releaseExpiredLocked ? `disabled title="当前存在竞争展位，无法变更"` : ""}>
             <option value="yes" ${rules.releaseExpiredBooths !== false ? "selected" : ""}>是，到期自动放开</option>
             <option value="no" ${rules.releaseExpiredBooths === false ? "selected" : ""}>否，允许水单竞争</option>
-          </select></label>
+          </select>${releaseExpiredLocked ? `<span class="field-note warning-note">当前存在竞争展位，完成竞争审批或取消后才能变更</span>` : ""}</label>
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>释放前提醒天数<input id="rule-notice" type="number" value="${rules.noticeDaysBeforeRelease}"></label>
@@ -3827,10 +3865,39 @@ const App = (() => {
     `;
   }
 
-  function workflowWithCountdown(text, tone, dateLabel, countdownLabel, value) {
+  function orderCompetingBoothIds(order) {
+    if (!order || order.type !== "booth" || order.status === "sold" || !isActiveOrder(order)) return [];
+    const boothIds = [...new Set((order.boothIds || []).map(Number).filter(Boolean))];
+    return boothIds.filter((boothId) => {
+      const booth = state.data.booths.find((item) => Number(item.id) === Number(boothId));
+      if (!isCompetitiveBooth(booth)) return false;
+      const activeOrders = state.data.orders.filter((item) => (
+        item.type === "booth"
+        && item.status !== "sold"
+        && isActiveOrder(item)
+        && (item.boothIds || []).some((id) => Number(id) === Number(boothId))
+      ));
+      return activeOrders.length > 1;
+    });
+  }
+
+  function orderHasCompetingBooth(order) {
+    return orderCompetingBoothIds(order).length > 0;
+  }
+
+  function competitivePaymentPriorityHtml() {
+    return `<div class="countdown-cell competitive-countdown"><strong>竞争展位以到款为准</strong></div>`;
+  }
+
+  function orderDeadlineCountdownHtml(order, dateLabel, countdownLabel, value) {
+    if (orderHasCompetingBooth(order)) return competitivePaymentPriorityHtml();
+    return deadlineCountdownHtml(dateLabel, countdownLabel, value);
+  }
+
+  function workflowWithCountdown(text, tone, dateLabel, countdownLabel, value, order = null) {
     return `
       ${workflowBadge(text, tone)}
-      ${deadlineCountdownHtml(dateLabel, countdownLabel, value)}
+      ${order ? orderDeadlineCountdownHtml(order, dateLabel, countdownLabel, value) : deadlineCountdownHtml(dateLabel, countdownLabel, value)}
     `;
   }
 
@@ -3851,30 +3918,30 @@ const App = (() => {
     if (order.status === "sold") return workflowBadge(partialPaidText || "已首款成交", "sold");
     if (salesFlowMode() === "contract_first") {
       if (contractStatus === "pending") {
-        return workflowWithCountdown("合同审批中", "pending", "预留到期", "预留倒计时", order.reserveExpiresAt);
+        return workflowWithCountdown("合同审批中", "pending", "预留到期", "预留倒计时", order.reserveExpiresAt, order);
       }
       if (contractStatus !== "approved") {
-        return workflowWithCountdown("未上传合同", "reserved", "预留到期", "预留倒计时", order.reserveExpiresAt);
+        return workflowWithCountdown("未上传合同", "reserved", "预留到期", "预留倒计时", order.reserveExpiresAt, order);
       }
       if (voucherStatus === "pending" || pendingPayment) {
-        return workflowWithCountdown("水单审核中", "pending", paymentDateLabel, paymentCountdownLabel, paymentDueAt);
+        return workflowWithCountdown("水单审核中", "pending", paymentDateLabel, paymentCountdownLabel, paymentDueAt, order);
       }
       if (voucherStatus !== "approved" && !activePayment) {
-        return workflowWithCountdown("未上传水单", "reserved", paymentDateLabel, paymentCountdownLabel, paymentDueAt);
+        return workflowWithCountdown("未上传水单", "reserved", paymentDateLabel, paymentCountdownLabel, paymentDueAt, order);
       }
     } else {
       if (voucherStatus === "pending" || pendingPayment) {
-        return workflowWithCountdown("水单审核中", "pending", "预留到期", "预留倒计时", order.reserveExpiresAt);
+        return workflowWithCountdown("水单审核中", "pending", "预留到期", "预留倒计时", order.reserveExpiresAt, order);
       }
       if (voucherStatus !== "approved" && !activePayment) {
-        return workflowWithCountdown("未上传水单", "reserved", "预留到期", "预留倒计时", order.reserveExpiresAt);
+        return workflowWithCountdown("未上传水单", "reserved", "预留到期", "预留倒计时", order.reserveExpiresAt, order);
       }
     }
-    if (partialPaidText) return workflowWithCountdown(partialPaidText, "sold", paymentDateLabel, paymentCountdownLabel, paymentDueAt);
+    if (partialPaidText) return workflowWithCountdown(partialPaidText, "sold", paymentDateLabel, paymentCountdownLabel, paymentDueAt, order);
     if (!["reserved", "pending_payment_review"].includes(order.status)) return statusBadge(order.status);
     return `
       ${statusBadge(order.status)}
-      ${deadlineCountdownHtml("预留到期", "预留倒计时", order.reserveExpiresAt)}
+      ${orderDeadlineCountdownHtml(order, "预留到期", "预留倒计时", order.reserveExpiresAt)}
     `;
   }
 
@@ -5032,6 +5099,46 @@ const App = (() => {
     ctx.drawImage(image, x, y, drawWidth, drawHeight);
   }
 
+  function drawSalesMapStatusLegend(ctx, width) {
+    const items = salesMapStatusLegendItems();
+    const boxSize = 11;
+    const gap = 12;
+    const paddingX = 10;
+    const paddingY = 7;
+    const height = boxSize + paddingY * 2;
+    ctx.save();
+    ctx.font = "12px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+    const itemWidths = items.map((item) => boxSize + 5 + ctx.measureText(item.label).width);
+    const contentWidth = itemWidths.reduce((total, itemWidth) => total + itemWidth, 0) + gap * Math.max(0, items.length - 1);
+    const legendWidth = Math.ceil(contentWidth + paddingX * 2);
+    const x = Math.max(28, width - legendWidth - 28);
+    const y = 14;
+    ctx.globalAlpha = 0.92;
+    drawRoundedRect(ctx, x, y, legendWidth, height, 6);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#d8e0ea";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    let cursorX = x + paddingX;
+    items.forEach((item, index) => {
+      const boxY = y + paddingY;
+      ctx.fillStyle = item.color;
+      ctx.fillRect(cursorX, boxY, boxSize, boxSize);
+      ctx.strokeStyle = item.label === statusText("competitive") ? "#0f766e" : "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cursorX, boxY, boxSize, boxSize);
+      cursorX += boxSize + 5;
+      ctx.fillStyle = "#42526b";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(item.label, cursorX, y + height / 2);
+      cursorX += ctx.measureText(item.label).width + (index === items.length - 1 ? 0 : gap);
+    });
+    ctx.restore();
+  }
+
   function applyFitMapZoom() {
     if (!state.data || state.mapZoom !== "fit") return;
     const map = state.data.map;
@@ -5099,11 +5206,12 @@ const App = (() => {
       const boothWidth = Number(booth.width || 0);
       const boothHeight = Number(booth.height || 0);
       const grayed = salesMapBoothDimmed(booth);
+      const status = boothSalesMapStatus(booth);
       drawRoundedRect(ctx, x, y, boothWidth, boothHeight, 2);
-      ctx.fillStyle = grayed ? "#c9d1dc" : zoneColor(booth.zone);
+      ctx.fillStyle = salesMapBoothFill(booth, grayed);
       ctx.fill();
-      ctx.lineWidth = state.salesMapFocusId === booth.id ? 5 : 1.4;
-      ctx.strokeStyle = state.salesMapFocusId === booth.id ? "#ffcf33" : "#ffffff";
+      ctx.lineWidth = state.salesMapFocusId === booth.id ? 5 : status === "competitive" ? 2.4 : 1.4;
+      ctx.strokeStyle = state.salesMapFocusId === booth.id ? "#ffcf33" : status === "competitive" ? "#0f766e" : "#ffffff";
       ctx.stroke();
       if (boothWidth >= 32 && boothHeight >= 22) {
         ctx.fillStyle = "#ffffff";
@@ -5164,6 +5272,7 @@ const App = (() => {
         ctx.fillText("障碍", x + obstacleWidth / 2, y + obstacleHeight / 2);
       }
     });
+    drawSalesMapStatusLegend(ctx, width);
     return new Promise((resolve, reject) => {
       canvas.toBlob((blob) => {
         if (blob) resolve(blob);
