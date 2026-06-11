@@ -10,6 +10,7 @@
   --warning: #b76e00;
   --danger: #c24141;
   --reserved: #e6a23c;
+  --competitive: #0f9f8f;
   --sold: #5c6ac4;
   --available: #18a058;
   --disabled: #7c8797;
@@ -109,6 +110,14 @@ textarea {
   color: var(--text);
 }
 
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: #f3f6fa;
+  color: #6b778c;
+  cursor: not-allowed;
+}
+
 textarea {
   min-height: 84px;
   resize: vertical;
@@ -119,6 +128,16 @@ label {
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.field-note {
+  display: block;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.warning-note {
+  color: var(--warning);
 }
 
 .login-page {
@@ -1024,9 +1043,9 @@ body.map-interacting {
 }
 
 .booth-rect.competitive {
+  fill: rgba(15, 159, 143, 0.92);
   stroke: #0f766e;
   stroke-width: 3;
-  stroke-dasharray: 6 3;
 }
 
 .booth-rect.sold {
@@ -1193,6 +1212,10 @@ body.map-interacting {
 
 .sales-booth-rect.unavailable {
   opacity: 0.76;
+}
+
+.sales-booth-rect.competitive {
+  opacity: 1;
 }
 
 .sales-booth-rect.focused {
@@ -1607,6 +1630,11 @@ tr:last-child td {
   color: var(--warning);
 }
 
+.status.competitive {
+  background: #e0fbf7;
+  color: #0f766e;
+}
+
 .status.rejected,
 .status.released,
 .status.cancelled {
@@ -1622,6 +1650,17 @@ tr:last-child td {
   color: var(--muted);
   line-height: 1.7;
   font-size: 13px;
+}
+
+.competitive-countdown {
+  margin-top: 4px;
+  color: #0f766e;
+  line-height: 1.5;
+}
+
+.competitive-countdown strong {
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .danger-text {

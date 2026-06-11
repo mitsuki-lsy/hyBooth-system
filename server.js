@@ -805,6 +805,10 @@ function canCompetitivelyReserveBooth(db, booth, now = Date.now()) {
   return orders.some((order) => ["reserved", "pending_payment_review"].includes(order.status) && orderReserveExpired(order, now));
 }
 
+function hasCompetitiveBooth(db, now = Date.now()) {
+  return (db.booths || []).some((booth) => canCompetitivelyReserveBooth(db, booth, now));
+}
+
 function canReserveBoothForOrder(db, booth, now = Date.now()) {
   return booth?.status === "available" || canCompetitivelyReserveBooth(db, booth, now);
 }
@@ -2729,9 +2733,13 @@ async function handleApi(req, res, url, body = {}) {
   if (pathname === "/api/settings" && method === "PUT") {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const incomingRules = { ...(body.rules || {}) };
+    const currentReleaseExpiredBooths = shouldReleaseExpiredBooths(db);
     if (!isSuperAdmin(user)) delete incomingRules.adminContactMaskMode;
     if (incomingRules.releaseExpiredBooths !== undefined) {
       incomingRules.releaseExpiredBooths = ![false, "false", 0, "0", "no"].includes(incomingRules.releaseExpiredBooths);
+      if (incomingRules.releaseExpiredBooths !== currentReleaseExpiredBooths && hasCompetitiveBooth(db)) {
+        return sendError(res, 409, "当前存在竞争展位，不能变更“到期展位是否放开”；请先完成竞争订单审批或取消后再调整");
+      }
     }
     const hasEnterpriseLinkDays = incomingRules.enterpriseLinkDays !== undefined;
     db.settings.rules = { ...db.settings.rules, ...incomingRules };
