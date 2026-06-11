@@ -2907,7 +2907,7 @@ const App = (() => {
     const totalBoothCount = boothEquivalentCount(booths);
     const filteredBoothCount = boothEquivalentCount(filteredBooths);
     const matchedBoothCount = boothEquivalentCount(matchedBooths);
-    const availableCount = boothEquivalentCount(booths.filter((booth) => booth.status === "available"));
+    const availableCount = boothEquivalentCount(booths.filter(isBoothOrderable));
     const reservedCount = boothEquivalentCount(booths.filter((booth) => booth.status === "reserved"));
     const soldCount = boothEquivalentCount(booths.filter((booth) => booth.status === "sold"));
     const countText = state.salesMapStatus
@@ -2978,7 +2978,7 @@ const App = (() => {
     if (state.salesMapZone && booth.zone !== state.salesMapZone) return true;
     if (state.salesMapAttr && booth.attr !== state.salesMapAttr) return true;
     if (state.salesMapStatus && booth.status !== state.salesMapStatus) return true;
-    if (state.salesMapOnlyAvailable && booth.status !== "available") return true;
+    if (state.salesMapOnlyAvailable && !isBoothOrderable(booth)) return true;
     return false;
   }
 
@@ -2992,7 +2992,7 @@ const App = (() => {
     const items = state.data.booths.map((booth) => {
       if (!boothIds.has(booth.id)) return "";
       const focused = state.salesMapFocusId === booth.id;
-      const available = booth.status === "available";
+      const available = isBoothOrderable(booth);
       const grayed = salesMapBoothDimmed(booth);
       const fill = grayed ? "#c9d1dc" : zoneColor(booth.zone);
       const textVisible = booth.width >= 32 && booth.height >= 22;
@@ -3073,6 +3073,10 @@ const App = (() => {
     ];
     const countdown = reserveCountdown(booth);
     if (countdown) lines.push(`预留倒计时：${countdown}`);
+    if (isCompetitiveBooth(booth)) {
+      const competingCount = activeOrdersForBooth(booth).length;
+      lines.push(`竞争状态：预留已到期，可再次预留${competingCount > 1 ? `（${competingCount} 个有效订单）` : ""}`);
+    }
     return lines.join("\n");
   }
 
@@ -3089,6 +3093,35 @@ const App = (() => {
     if (days > 0) return `${days}天${hours}小时`;
     if (hours > 0) return `${hours}小时${minutes}分钟`;
     return `${Math.max(1, minutes)}分钟`;
+  }
+
+  function releaseExpiredBoothsEnabled() {
+    return state.data?.settings?.rules?.releaseExpiredBooths !== false;
+  }
+
+  function orderReserveExpired(order) {
+    const expiresAt = new Date(order?.reserveExpiresAt || 0).getTime();
+    return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+  }
+
+  function activeOrdersForBooth(booth) {
+    return (state.data?.orders || []).filter((order) => (
+      order.type === "booth"
+      && isActiveOrder(order)
+      && (order.boothIds || []).some((id) => Number(id) === Number(booth?.id))
+    ));
+  }
+
+  function isCompetitiveBooth(booth) {
+    if (!booth || releaseExpiredBoothsEnabled()) return false;
+    if (["available", "disabled", "sold"].includes(booth.status)) return false;
+    const orders = activeOrdersForBooth(booth);
+    if (orders.some((order) => order.status === "sold")) return false;
+    return orders.some((order) => ["reserved", "pending_payment_review"].includes(order.status) && orderReserveExpired(order));
+  }
+
+  function isBoothOrderable(booth) {
+    return Boolean(booth && !booth.locked && (booth.status === "available" || isCompetitiveBooth(booth)));
   }
 
   function activeOrderForBooth(booth) {
@@ -3254,10 +3287,12 @@ const App = (() => {
     const booths = state.data.booths.map((booth) => {
       const selected = state.selectedBoothIds.has(booth.id) || state.selectedBoothId === booth.id;
       const base = state.selectedBoothIds.has(booth.id) && state.selectedBoothId === booth.id;
+      const competitive = isCompetitiveBooth(booth);
       const textVisible = booth.width >= 32 && booth.height >= 22;
       return `
         <g data-booth-id="${booth.id}" onclick="App.boothClick(event, ${booth.id})">
-          <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${base ? "base" : ""} ${booth.locked ? "locked" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
+          <title>${h(salesBoothTooltip(booth))}</title>
+          <rect class="booth-rect ${h(booth.status)} ${competitive ? "competitive" : ""} ${selected ? "selected" : ""} ${base ? "base" : ""} ${booth.locked ? "locked" : ""}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
           ${textVisible ? boothMapLabelSvg(booth) : ""}
           ${booth.locked ? `<text class="booth-lock-text" x="${booth.x + Number(booth.width || 0) - 8}" y="${booth.y + 12}">锁</text>` : ""}
         </g>
@@ -3425,13 +3460,13 @@ const App = (() => {
   }
 
   function selectedBoothSummary(booths) {
-    if (!booths.length) return `<div class="empty">点击绿色空闲展位加入选择。</div>`;
+    if (!booths.length) return `<div class="empty">点击空闲或到期可竞争展位加入选择。</div>`;
     return `
       <div class="compact-list">
         ${booths.map((booth) => `
           <div class="compact-item">
             <strong>${h(booth.boothNo)}</strong>
-            <div class="hint">${h(booth.hall || "-")} · ${h(booth.zone)} · ${attrText(booth.attr)} · ${booth.area}㎡ · ${money(booth.price)}</div>
+            <div class="hint">${h(booth.hall || "-")} · ${h(booth.zone)} · ${attrText(booth.attr)} · ${booth.area}㎡ · ${money(booth.price)}${isCompetitiveBooth(booth) ? " · 到期竞争" : ""}</div>
           </div>
         `).join("")}
       </div>
@@ -3468,6 +3503,10 @@ const App = (() => {
             <option value="natural" ${deadlineDayMode === "natural" ? "selected" : ""}>自然日</option>
           </select></label>
           <label>预留有效天数（${deadlineDayModeText}）<input id="rule-workdays" type="number" value="${rules.reserveWorkdays ?? 7}"></label>
+          <label>到期展位是否放开<select id="rule-release-expired-booths" onchange="App.salesFlowRuleChanged()">
+            <option value="yes" ${rules.releaseExpiredBooths !== false ? "selected" : ""}>是，到期自动放开</option>
+            <option value="no" ${rules.releaseExpiredBooths === false ? "selected" : ""}>否，允许水单竞争</option>
+          </select></label>
         </div>
         <div class="grid two compact-grid" style="margin-top:14px">
           <label>释放前提醒天数<input id="rule-notice" type="number" value="${rules.noticeDaysBeforeRelease}"></label>
@@ -3702,7 +3741,7 @@ const App = (() => {
             ${pickerMapSvg(booths)}
           </div>
           <div class="compact-list">
-            ${selectedBooths.map((booth) => `<div class="compact-item"><strong>${h(booth.boothNo)}</strong><div class="hint">${h(booth.hall || "-")} · ${h(booth.zone)} · ${attrText(booth.attr)} · ${booth.widthM}m x ${booth.depthM}m · ${money(booth.price)}</div></div>`).join("") || `<div class="empty">点击绿色空闲展位进行选择</div>`}
+            ${selectedBooths.map((booth) => `<div class="compact-item"><strong>${h(booth.boothNo)}</strong><div class="hint">${h(booth.hall || "-")} · ${h(booth.zone)} · ${attrText(booth.attr)} · ${booth.widthM}m x ${booth.depthM}m · ${money(booth.price)}${isCompetitiveBooth(booth) ? " · 到期竞争" : ""}</div></div>`).join("") || `<div class="empty">点击空闲或到期可竞争展位进行选择</div>`}
           </div>
           <div class="split-actions">
             <button onclick="App.confirmBoothPicker()">${state.customerAttendLeadId ? "确定展位并创建订单" : "确定展位"}</button>
@@ -3724,11 +3763,12 @@ const App = (() => {
       if (!boothIds.has(booth.id)) return "";
       const selected = state.pendingBoothIds.includes(booth.id);
       const focused = state.boothPickerFocusId === booth.id;
-      const selectable = booth.status === "available";
+      const selectable = isBoothOrderable(booth);
       const textVisible = booth.width >= 32 && booth.height >= 22;
       return `
         <g data-booth-id="${booth.id}" onclick="App.pickerBoothClick(event, ${booth.id})">
-          <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${selectable ? "" : "unselectable"}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
+          <title>${h(salesBoothTooltip(booth))}</title>
+          <rect class="booth-rect ${h(booth.status)} ${isCompetitiveBooth(booth) ? "competitive" : ""} ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${selectable ? "" : "unselectable"}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
           ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
         </g>
       `;
@@ -4221,15 +4261,60 @@ const App = (() => {
     `;
   }
 
+  function boothNosForIds(ids) {
+    return [...new Set((ids || []).map(Number).filter(Boolean))]
+      .map((id) => state.data.booths.find((booth) => Number(booth.id) === id)?.boothNo || "")
+      .filter(Boolean)
+      .join(" / ");
+  }
+
+  function duplicatePendingPaymentsForPayment(payment) {
+    const order = state.data.orders.find((item) => Number(item.id) === Number(payment?.orderId));
+    if (!order || order.type !== "booth") return [];
+    const boothIds = new Set((order.boothIds || []).map(Number).filter(Boolean));
+    if (!boothIds.size) return [];
+    const rows = (state.data.payments || []).filter((item) => {
+      if (item.status !== "pending") return false;
+      const itemOrder = state.data.orders.find((orderRow) => Number(orderRow.id) === Number(item.orderId));
+      return itemOrder
+        && itemOrder.type === "booth"
+        && isActiveOrder(itemOrder)
+        && (itemOrder.boothIds || []).some((boothId) => boothIds.has(Number(boothId)));
+    }).sort((a, b) => {
+      const left = new Date(a.paidAt || a.createdAt || 0).getTime();
+      const right = new Date(b.paidAt || b.createdAt || 0).getTime();
+      return (Number.isFinite(left) ? left : 0) - (Number.isFinite(right) ? right : 0);
+    });
+    const orderIds = new Set(rows.map((item) => Number(item.orderId)));
+    return orderIds.size > 1 ? rows : [];
+  }
+
+  function duplicatePaymentWarningText(paymentId) {
+    const payment = state.data.payments.find((item) => Number(item.id) === Number(paymentId));
+    const order = state.data.orders.find((item) => Number(item.id) === Number(payment?.orderId));
+    const duplicates = duplicatePendingPaymentsForPayment(payment);
+    if (!order || duplicates.length <= 1) return "";
+    const currentBoothIds = new Set((order.boothIds || []).map(Number).filter(Boolean));
+    const lines = duplicates.map((item, index) => {
+      const itemOrder = state.data.orders.find((row) => Number(row.id) === Number(item.orderId)) || {};
+      const sharedIds = (itemOrder.boothIds || []).map(Number).filter((boothId) => currentBoothIds.has(boothId));
+      const company = getCompany(itemOrder.companyId);
+      return `${index + 1}. 展位 ${boothNosForIds(sharedIds) || "-"} · ${itemOrder.orderNo || "-"} · ${company.name || "-"} · ${money(item.amount)} · 到账 ${item.paidAt || "-"} · 提交 ${date(item.createdAt) || "-"}`;
+    });
+    return `检测到同一展位存在多条待审水单：\n${lines.join("\n")}`;
+  }
+
   function paymentApprovalRow(payment) {
     const order = state.data.orders.find((item) => item.id === payment.orderId) || {};
     const company = getCompany(order.companyId);
     const link = payment.voucherAttachmentId ? attachmentPreviewButton(payment.voucherAttachmentId, "预览水单") : "无附件";
+    const duplicates = duplicatePendingPaymentsForPayment(payment);
+    const duplicateHint = duplicates.length > 1 ? `<div class="hint danger-text">重复展位水单 ${duplicates.length} 条，请审批前比较到账时间</div>` : "";
     return `
       <tr>
         <td><strong>${h(order.orderNo)}</strong><div class="hint">${h(company.name)}</div></td>
         <td>${money(payment.amount)}<div class="hint">${h(payment.payer)} · ${h(payment.paidAt)}</div></td>
-        <td>${link}</td>
+        <td>${link}${duplicateHint}</td>
         <td class="split-actions">
           <button class="success" onclick="App.reviewPayment(${payment.id}, 'approved')">通过</button>
           <button class="danger" onclick="App.reviewPayment(${payment.id}, 'rejected')">驳回</button>
@@ -4716,6 +4801,12 @@ const App = (() => {
     return [...state.selectedBoothIds]
       .map((id) => state.data.booths.find((booth) => booth.id === id))
       .filter((booth) => booth && booth.status === "available" && !booth.locked);
+  }
+
+  function selectedOrderableBooths() {
+    return [...state.selectedBoothIds]
+      .map((id) => state.data.booths.find((booth) => booth.id === id))
+      .filter(isBoothOrderable);
   }
 
   function clampRectToMap(rect) {
@@ -5637,7 +5728,7 @@ const App = (() => {
       state.companyDetailId = null;
       state.customerAttendLeadId = leadId || null;
       state.pendingBoothIds = [...new Set(state.pendingBoothIds)]
-        .filter((id) => state.data.booths.some((booth) => Number(booth.id) === Number(id) && booth.status === "available"));
+        .filter((id) => state.data.booths.some((booth) => Number(booth.id) === Number(id) && isBoothOrderable(booth)));
       state.boothPickerOpen = true;
       state.boothPickerSearch = "";
       state.boothPickerFocusId = null;
@@ -6466,7 +6557,7 @@ const App = (() => {
         state.selectedBoothId = boothId;
         state.selectedObstacleId = null;
         state.selectedActivityAreaId = null;
-      } else if (booth.status === "available") {
+      } else if (isBoothOrderable(booth)) {
         if (state.selectedBoothIds.has(boothId)) state.selectedBoothIds.delete(boothId);
         else state.selectedBoothIds.add(boothId);
       }
@@ -6705,12 +6796,12 @@ const App = (() => {
       render();
     },
     useSelectedBooths() {
-      const boothIds = selectedAvailableBooths().map((booth) => booth.id);
+      const boothIds = selectedOrderableBooths().map((booth) => booth.id);
       state.pendingBoothIds = [...new Set(boothIds)];
       state.view = "new-customers";
       state.message = state.pendingBoothIds.length
         ? `已带入 ${state.pendingBoothIds.length} 个展位，请在客户列表选择企业后点击“参展”创建订单`
-        : "请先选择空闲展位";
+        : "请先选择空闲或到期可竞争展位";
       render();
     },
     openBoothPicker() {
@@ -6765,7 +6856,7 @@ const App = (() => {
       this.updateOrderDraft();
       event.stopPropagation();
       const booth = state.data.booths.find((item) => item.id === boothId);
-      if (!booth || booth.status !== "available") return;
+      if (!isBoothOrderable(booth)) return;
       if (state.pendingBoothIds.includes(boothId)) {
         state.pendingBoothIds = state.pendingBoothIds.filter((id) => id !== boothId);
       } else {
@@ -7439,6 +7530,10 @@ const App = (() => {
       }), "变更申请已提交");
     },
     async reviewPayment(paymentId, status) {
+      if (status === "approved") {
+        const warning = duplicatePaymentWarningText(paymentId);
+        if (warning && !window.confirm(`${warning}\n\n确认通过当前水单吗？`)) return;
+      }
       const body = reviewRemarkPayload(status, "水单审核");
       if (!body) return;
       await run(() => api(`/api/payments/${paymentId}/review`, {
@@ -7487,6 +7582,7 @@ const App = (() => {
             rawPrice: Number(byId("rule-raw").value || 0),
             depositRate: Number(byId("rule-deposit").value || 0),
             reserveWorkdays: Number(byId("rule-workdays").value || 0),
+            releaseExpiredBooths: (byId("rule-release-expired-booths")?.value || "yes") !== "no",
             deadlineDayMode: byId("rule-deadline-day-mode")?.value || "workday",
             noticeDaysBeforeRelease: Number(byId("rule-notice").value || 0),
             newCustomerProtectDays: Number(byId("rule-new-customer-days").value || 0),
@@ -7511,6 +7607,7 @@ const App = (() => {
       rules.rawPrice = Number(byId("rule-raw")?.value ?? rules.rawPrice ?? 0);
       rules.depositRate = Number(byId("rule-deposit")?.value ?? rules.depositRate ?? 0);
       rules.reserveWorkdays = Number(byId("rule-workdays")?.value ?? rules.reserveWorkdays ?? 7);
+      rules.releaseExpiredBooths = (byId("rule-release-expired-booths")?.value || (rules.releaseExpiredBooths === false ? "no" : "yes")) !== "no";
       rules.deadlineDayMode = byId("rule-deadline-day-mode")?.value || rules.deadlineDayMode || "workday";
       rules.noticeDaysBeforeRelease = Number(byId("rule-notice")?.value ?? rules.noticeDaysBeforeRelease ?? 0);
       rules.newCustomerProtectDays = Number(byId("rule-new-customer-days")?.value ?? rules.newCustomerProtectDays ?? 30);
