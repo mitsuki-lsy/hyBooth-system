@@ -1023,6 +1023,12 @@ body.map-interacting {
   fill: rgba(230, 162, 60, 0.9);
 }
 
+.booth-rect.competitive {
+  stroke: #0f766e;
+  stroke-width: 3;
+  stroke-dasharray: 6 3;
+}
+
 .booth-rect.sold {
   fill: rgba(92, 106, 196, 0.9);
 }
@@ -1616,6 +1622,10 @@ tr:last-child td {
   color: var(--muted);
   line-height: 1.7;
   font-size: 13px;
+}
+
+.danger-text {
+  color: var(--danger);
 }
 
 .split-actions {

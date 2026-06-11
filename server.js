@@ -134,6 +134,19 @@ function isReviewStatus(status) {
   return REVIEW_STATUSES.has(String(status || ""));
 }
 
+function shouldReleaseExpiredBooths(db) {
+  return db.settings?.rules?.releaseExpiredBooths !== false;
+}
+
+function orderReserveExpired(order, now = Date.now()) {
+  const expiresAt = new Date(order?.reserveExpiresAt || 0).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+function orderUsesBooth(order, boothId) {
+  return (order?.boothIds || []).some((id) => Number(id) === Number(boothId));
+}
+
 function normalizeDiscountRules(rules) {
   return (Array.isArray(rules) ? rules : []).map((rule) => ({
     id: String(rule?.id || `discount-${randomToken(5)}`),
@@ -776,6 +789,75 @@ function activeCurrentOrderForCompany(db, eventId, companyId) {
   ));
 }
 
+function activeOrdersForBooth(db, boothId) {
+  return db.orders.filter((order) => (
+    order.type === "booth"
+    && isActiveOrder(order)
+    && orderUsesBooth(order, boothId)
+  ));
+}
+
+function canCompetitivelyReserveBooth(db, booth, now = Date.now()) {
+  if (!booth || shouldReleaseExpiredBooths(db)) return false;
+  if (["available", "disabled", "sold"].includes(String(booth.status || ""))) return false;
+  const orders = activeOrdersForBooth(db, booth.id);
+  if (orders.some((order) => order.status === "sold")) return false;
+  return orders.some((order) => ["reserved", "pending_payment_review"].includes(order.status) && orderReserveExpired(order, now));
+}
+
+function canReserveBoothForOrder(db, booth, now = Date.now()) {
+  return booth?.status === "available" || canCompetitivelyReserveBooth(db, booth, now);
+}
+
+function cancelCompetingBoothOrders(db, winnerOrder, actor) {
+  if (!winnerOrder || winnerOrder.type !== "booth" || winnerOrder.status !== "sold") return { cancelledOrders: [], restoredLeads: [] };
+  const winningBoothIds = new Set((winnerOrder.boothIds || []).map(Number));
+  const cancelled = [];
+  const restoredLeads = [];
+  db.orders.forEach((order) => {
+    if (order.id === winnerOrder.id || order.type !== "booth" || !isActiveOrder(order) || order.status === "sold") return;
+    if (!(order.boothIds || []).some((boothId) => winningBoothIds.has(Number(boothId)))) return;
+    order.status = "cancelled";
+    order.cancelledAt = nowIso();
+    order.cancelReason = `同展位订单 ${winnerOrder.orderNo} 水单已审核通过`;
+    order.updatedAt = nowIso();
+    order.boothIds.forEach((boothId) => {
+      const booth = db.booths.find((item) => item.id === boothId && item.orderId === order.id);
+      if (booth && !winningBoothIds.has(Number(boothId))) {
+        booth.status = "available";
+        booth.orderId = null;
+        booth.reservedAt = null;
+        booth.reservedBy = null;
+        booth.updatedAt = nowIso();
+      }
+    });
+    db.payments
+      .filter((payment) => Number(payment.orderId) === Number(order.id) && payment.status === "pending")
+      .forEach((payment) => {
+        payment.status = "rejected";
+        payment.reviewedBy = actor?.id || null;
+        payment.reviewedAt = nowIso();
+        payment.reviewRemark = order.cancelReason;
+      });
+    const restoredLead = restoreOrderCompanyToNewLead(db, order, order.cancelReason, actor);
+    if (restoredLead) restoredLeads.push(restoredLead);
+    notify(db, order.salespersonId, "订单已自动取消", `${order.orderNo} 与 ${winnerOrder.orderNo} 存在重复展位，已按水单审批结果自动取消`);
+    writeLog(db, actor || null, "自动取消重复展位订单", `${order.orderNo}，成交订单 ${winnerOrder.orderNo}`, "order", order.id);
+    cancelled.push(order);
+  });
+  winnerOrder.boothIds.forEach((boothId) => {
+    const booth = db.booths.find((item) => Number(item.id) === Number(boothId));
+    if (booth) {
+      booth.status = "sold";
+      booth.orderId = winnerOrder.id;
+      booth.reservedAt = booth.reservedAt || winnerOrder.createdAt || nowIso();
+      booth.reservedBy = winnerOrder.salespersonId;
+      booth.updatedAt = nowIso();
+    }
+  });
+  return { cancelledOrders: cancelled, restoredLeads };
+}
+
 function materializeOldCustomerLeads(db) {
   const event = db.settings.event || {};
   const linkedEventId = String(event.linkedEventId || "").trim();
@@ -839,6 +921,66 @@ function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
       lead.publicReason = "";
     }
   });
+}
+
+function restoreOrderCompanyToNewLead(db, order, reason, actor) {
+  if (!order) return null;
+  const company = db.companies.find((item) => Number(item.id) === Number(order.companyId));
+  if (!company) return null;
+  const ownerSalesId = Number(order.salespersonId || company.ownerSalesId || 0) || null;
+  let lead = db.customerLeads.find((item) => (
+    String(item.eventId) === String(order.eventId)
+    && Number(item.companyId) === Number(order.companyId)
+  ));
+  if (!lead) {
+    lead = {
+      id: id(db, "customerLead"),
+      eventId: order.eventId,
+      companyId: order.companyId,
+      customerType: "new",
+      status: "protected",
+      ownerSalesId,
+      protectedUntil: addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30)),
+      sourceOrderId: null,
+      sourceEventName: "",
+      sourceAmount: 0,
+      contractAttachmentIds: [],
+      voucherAttachmentIds: [],
+      contractReviewStatus: "none",
+      contractReviewedBy: null,
+      contractReviewedAt: "",
+      contractReviewRemark: "",
+      voucherReviewStatus: "none",
+      voucherReviewedBy: null,
+      voucherReviewedAt: "",
+      voucherReviewRemark: "",
+      voucherDueAt: "",
+      publicReason: "",
+      createdAt: nowIso(),
+      claimedAt: "",
+      releasedAt: "",
+      convertedAt: ""
+    };
+    db.customerLeads.push(lead);
+  } else {
+    lead.customerType = "new";
+    lead.status = "protected";
+    lead.ownerSalesId = ownerSalesId || lead.ownerSalesId || null;
+    lead.protectedUntil = addDays(nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30));
+    lead.sourceOrderId = null;
+    lead.sourceEventName = "";
+    lead.sourceAmount = 0;
+    lead.publicReason = "";
+    lead.releasedAt = "";
+    lead.convertedAt = "";
+  }
+  if (ownerSalesId) {
+    company.ownerSalesId = ownerSalesId;
+    saveLeadContactVersion(db, lead, ownerSalesId, company);
+    notify(db, ownerSalesId, "客户已回到新客户列表", `${company.name || "客户"} 因${reason}已回到新客户列表`);
+  }
+  writeLog(db, actor || null, "客户回到新客户列表", `${company.name || order.companyId}，${reason}`, "customerLead", lead.id);
+  return lead;
 }
 
 function reminderDueSoon(value, hours = 48) {
@@ -1212,6 +1354,7 @@ function defaultDb() {
         rawPrice: 1200,
         depositRate: 0.3,
         reserveWorkdays: 7,
+        releaseExpiredBooths: true,
         noticeDaysBeforeRelease: 2,
         newCustomerProtectDays: 30,
         oldCustomerProtectDays: 30,
@@ -1374,6 +1517,7 @@ function normalizeDb(db) {
   if (db.settings.rules.reserveWorkdays === undefined) {
     db.settings.rules.reserveWorkdays = Number(db.settings.rules.reserveDays || 7);
   }
+  if (db.settings.rules.releaseExpiredBooths === undefined) db.settings.rules.releaseExpiredBooths = true;
   if (db.settings.rules.newCustomerProtectDays === undefined) db.settings.rules.newCustomerProtectDays = 30;
   if (db.settings.rules.oldCustomerProtectDays === undefined) db.settings.rules.oldCustomerProtectDays = 30;
   db.settings.rules.deadlineDayMode = deadlineDayMode(db);
@@ -1989,6 +2133,7 @@ function releaseExpiredOrders(db, actor) {
     if (!reserveExpired && !voucherDueExpired) return;
     recalcOrder(db, order);
     if (order.status === "sold") return;
+    if (order.type === "booth" && !shouldReleaseExpiredBooths(db)) return;
     const pendingPayment = db.payments.some((payment) => payment.orderId === order.id && payment.status === "pending");
     if (pendingPayment) return;
     if (leadHasPendingReview(lead)) return;
@@ -2585,6 +2730,9 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const incomingRules = { ...(body.rules || {}) };
     if (!isSuperAdmin(user)) delete incomingRules.adminContactMaskMode;
+    if (incomingRules.releaseExpiredBooths !== undefined) {
+      incomingRules.releaseExpiredBooths = ![false, "false", 0, "0", "no"].includes(incomingRules.releaseExpiredBooths);
+    }
     const hasEnterpriseLinkDays = incomingRules.enterpriseLinkDays !== undefined;
     db.settings.rules = { ...db.settings.rules, ...incomingRules };
     db.settings.rules.adminContactMaskMode = adminContactMaskMode(db);
@@ -3351,7 +3499,9 @@ async function handleApi(req, res, url, body = {}) {
   if (pathname === "/api/companies" && method === "POST") {
     if (!requireRole(user, ["admin", "sales"])) return sendError(res, 403, "无权新增客户");
     const name = String(body.name || "").trim();
+    const shortName = String(body.shortName || "").trim();
     if (!name) return sendError(res, 400, "企业名称必填");
+    if (!shortName) return sendError(res, 400, "企业简称必填");
     const eventId = db.settings.event.id;
     const ownerSalesId = user.role === "sales" ? user.id : (Number(body.ownerSalesId) || user.id);
     const capacity = ensureProtectionCapacity(db, eventId, ownerSalesId);
@@ -3365,7 +3515,7 @@ async function handleApi(req, res, url, body = {}) {
     if (company) {
       const existingLead = db.customerLeads.find((lead) => String(lead.eventId) === String(eventId) && Number(lead.companyId) === Number(company.id) && lead.status !== "converted");
       if (existingLead) return sendError(res, 409, existingLead.status === "public" ? "该企业已在客户公海中，请从公海认领" : "该企业已在客户列表中");
-      company.shortName = String(body.shortName || company.shortName || "").trim();
+      company.shortName = shortName || String(company.shortName || "").trim();
       company.contactName = body.contactName || company.contactName || "";
       company.phone = body.phone || company.phone || "";
       company.email = body.email || company.email || "";
@@ -3381,7 +3531,7 @@ async function handleApi(req, res, url, body = {}) {
       company = {
         id: id(db, "company"),
         name,
-        shortName: String(body.shortName || "").trim(),
+        shortName,
         contactName: body.contactName || "",
         phone: body.phone || "",
         email: body.email || "",
@@ -3465,6 +3615,7 @@ async function handleApi(req, res, url, body = {}) {
     const name = user.role === "sales" ? String(company.name || "").trim() : submittedName;
     const shortName = user.role === "sales" ? String(company.shortName || "").trim() : submittedShortName;
     if (!name) return sendError(res, 400, "企业名称必填");
+    if (!shortName) return sendError(res, 400, "企业简称必填");
     if (isAdminLike(user)) {
       const nameConflict = db.companies.find((item) => Number(item.id) !== Number(company.id) && companyNameKey(item.name) === companyNameKey(name));
       if (nameConflict) return sendError(res, 409, "企业名称已存在");
@@ -3602,8 +3753,10 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["admin", "sales"])) return sendError(res, 403, "无权限");
     let companyId = Number(body.companyId || 0);
     const incomingCompanyName = String(body.company?.name || "").trim();
+    const incomingCompanyShortName = String(body.company?.shortName || "").trim();
     const incomingTaxKey = companyTaxKey(body.company?.taxNo);
     if (!companyId && !incomingCompanyName) return sendError(res, 400, "企业名称必填");
+    if (!companyId && !incomingCompanyShortName) return sendError(res, 400, "企业简称必填");
     if (!companyId && incomingTaxKey) {
       const existingCompany = db.companies.find((company) => companyTaxKey(company.taxNo) === incomingTaxKey);
       if (existingCompany) companyId = existingCompany.id;
@@ -3616,7 +3769,7 @@ async function handleApi(req, res, url, body = {}) {
       const company = {
         id: id(db, "company"),
         name: incomingCompanyName,
-        shortName: String(body.company.shortName || "").trim(),
+        shortName: incomingCompanyShortName,
         contactName: body.company.contactName || "",
         phone: body.company.phone || "",
         email: body.company.email || "",
@@ -3635,8 +3788,9 @@ async function handleApi(req, res, url, body = {}) {
     }
     const company = db.companies.find((item) => item.id === companyId);
     if (!company) return sendError(res, 400, "请先选择或创建企业");
-    if (body.company?.shortName !== undefined) company.shortName = String(body.company.shortName || company.shortName || "").trim();
+    if (body.company?.shortName !== undefined) company.shortName = incomingCompanyShortName || String(company.shortName || "").trim();
     if (!companyNameKey(company.name)) return sendError(res, 400, "企业名称必填");
+    if (!String(company.shortName || "").trim()) return sendError(res, 400, "企业简称必填");
     const duplicatedOrder = db.orders.find((order) => {
       if (order.eventId !== db.settings.event.id) return false;
       if (isClosedOrderStatus(order.status)) return false;
@@ -3655,7 +3809,7 @@ async function handleApi(req, res, url, body = {}) {
       if (!boothIds.length) return sendError(res, 400, "请选择展位");
       const booths = boothIds.map((boothId) => db.booths.find((item) => item.id === boothId && String(item.eventId || db.settings.event.id) === String(db.settings.event.id)));
       if (booths.some((booth) => !booth)) return sendError(res, 404, "部分展位不存在");
-      if (booths.some((booth) => booth.status !== "available")) return sendError(res, 409, "所选展位已被占用");
+      if (booths.some((booth) => !canReserveBoothForOrder(db, booth))) return sendError(res, 409, "所选展位已被占用");
       if (booths.some((booth) => !canAccessBoothDepartment(db, user, booth))) return sendError(res, 403, "所选展位不属于当前部门，不能预订");
       boothSnapshot = booths.map(boothSnapshotFromBooth);
       totalAmount = boothSnapshot.reduce((sum, booth) => sum + Number(booth.price || 0), 0);
@@ -3699,6 +3853,7 @@ async function handleApi(req, res, url, body = {}) {
     if (type === "booth") {
       order.boothIds.forEach((boothId) => {
         const booth = db.booths.find((item) => item.id === boothId);
+        if (!booth || booth.status !== "available") return;
         booth.status = "reserved";
         booth.orderId = order.id;
         booth.reservedAt = nowIso();
@@ -3756,13 +3911,32 @@ async function handleApi(req, res, url, body = {}) {
     const order = db.orders.find((item) => item.id === payment.orderId);
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
+    if (nextStatus === "approved" && order?.type === "booth") {
+      const boothIds = new Set((order.boothIds || []).map(Number));
+      const soldConflict = db.orders.find((item) => (
+        item.id !== order.id
+        && item.type === "booth"
+        && item.status === "sold"
+        && isActiveOrder(item)
+        && (item.boothIds || []).some((boothId) => boothIds.has(Number(boothId)))
+      ));
+      if (soldConflict) return sendError(res, 409, `展位已由订单 ${soldConflict.orderNo} 成交，不能再次通过水单`);
+    }
     payment.status = nextStatus;
     payment.reviewedBy = user.id;
     payment.reviewedAt = nowIso();
     payment.reviewRemark = reviewRemarkFromBody(body);
     recalcOrder(db, order);
+    let cancelledOrders = [];
+    let restoredLeads = [];
     if (payment.status === "approved") {
       markCustomerLeadConverted(db, order.eventId, order.companyId);
+      if (order.status === "sold") ensureProfile(db, order);
+      if (order.status === "sold") {
+        const competitionResult = cancelCompetingBoothOrders(db, order, user);
+        cancelledOrders = competitionResult.cancelledOrders;
+        restoredLeads = competitionResult.restoredLeads;
+      }
     } else {
       const lead = activeLeadForOrder(db, order);
       if (lead) releaseLeadToPublic(db, lead, "水单审核驳回", user);
@@ -3771,7 +3945,7 @@ async function handleApi(req, res, url, body = {}) {
     writeLog(db, user, payment.status === "approved" ? "审核通过水单" : "驳回水单", `${order.orderNo} ${payment.amount}`, "payment", payment.id);
     notify(db, order.salespersonId, "水单审核结果", `${order.orderNo} ${payment.status === "approved" ? "审核通过" : "已驳回"}`);
     saveDb(db);
-    return send(res, 200, { payment, order });
+    return send(res, 200, { payment, order, cancelledOrders, restoredLeads });
   }
 
   const enterpriseAccountMatch = pathname.match(/^\/api\/orders\/(\d+)\/enterprise-account$/);
