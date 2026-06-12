@@ -3886,6 +3886,8 @@ async function handleApi(req, res, url, body = {}) {
       const due = new Date(leadForOrder.voucherDueAt || 0).getTime();
       if (Number.isFinite(due) && due <= Date.now()) return sendError(res, 409, "合同通过后的水单上传期限已过");
     }
+    const pendingPayment = db.payments.find((payment) => Number(payment.orderId) === Number(order.id) && payment.status === "pending");
+    if (pendingPayment) return sendError(res, 409, "该订单已有水单待审核，请勿重复提交");
     const amount = Number(body.amount || 0);
     if (amount <= 0) return sendError(res, 400, "收款金额必须大于 0");
     const payment = {
@@ -3918,6 +3920,7 @@ async function handleApi(req, res, url, body = {}) {
     if (!payment) return sendError(res, 404, "水单不存在");
     const order = db.orders.find((item) => item.id === payment.orderId);
     const nextStatus = body.status === "approved" ? "approved" : "rejected";
+    if (payment.status !== "pending") return sendError(res, 409, "该水单已处理，不能重复审核");
     if (!requireRejectedReviewRemark(res, nextStatus, body)) return;
     if (nextStatus === "approved" && order?.type === "booth") {
       const boothIds = new Set((order.boothIds || []).map(Number));
@@ -3934,6 +3937,16 @@ async function handleApi(req, res, url, body = {}) {
     payment.reviewedBy = user.id;
     payment.reviewedAt = nowIso();
     payment.reviewRemark = reviewRemarkFromBody(body);
+    if (payment.status === "approved") {
+      db.payments
+        .filter((item) => Number(item.orderId) === Number(order.id) && item.id !== payment.id && item.status === "pending")
+        .forEach((item) => {
+          item.status = "rejected";
+          item.reviewedBy = user.id;
+          item.reviewedAt = nowIso();
+          item.reviewRemark = "同订单已有水单审核通过，自动驳回重复提交";
+        });
+    }
     recalcOrder(db, order);
     let cancelledOrders = [];
     let restoredLeads = [];

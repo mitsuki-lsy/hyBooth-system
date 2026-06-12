@@ -19,6 +19,7 @@ const App = (() => {
     boothPickerSearch: "",
     boothPickerFocusId: null,
     paymentModalOrderId: null,
+    paymentSubmittingOrderId: null,
     changePickerOpen: false,
     changePickerOrderId: null,
     changePickerSearch: "",
@@ -4028,22 +4029,23 @@ const App = (() => {
   function paymentModal() {
     const order = state.data.orders.find((item) => item.id === state.paymentModalOrderId);
     if (!order) return "";
+    const isSubmitting = Number(state.paymentSubmittingOrderId) === Number(order.id);
     return `
       <div class="modal-backdrop">
         <section class="modal small">
           <header class="modal-header">
             <h2>上传水单</h2>
-            <button class="secondary" onclick="App.closePaymentModal()">关闭</button>
+            <button class="secondary" onclick="App.closePaymentModal()" ${isSubmitting ? "disabled" : ""}>关闭</button>
           </header>
           <div class="notice">${h(order.orderNo)} · ${h(getCompany(order.companyId).name || "")} · 当前已收 ${money(order.paidApprovedAmount)}</div>
           <div class="grid two" style="margin-top:14px">
-            <label>收款金额<input id="payment-amount" type="number" min="1" placeholder="请输入本次收款金额"></label>
-            <label>水单文件<input id="payment-file" type="file" accept="image/*,.pdf"></label>
+            <label>收款金额<input id="payment-amount" type="number" min="1" placeholder="请输入本次收款金额" ${isSubmitting ? "disabled" : ""}></label>
+            <label>水单文件<input id="payment-file" type="file" accept="image/*,.pdf" ${isSubmitting ? "disabled" : ""}></label>
           </div>
           <div class="split-actions" style="margin-top:14px">
-            <button onclick="App.submitPayment(${order.id})">提交管理员审核</button>
-            ${specialOrderActionButton(order, state.data.me.role === "sales" && isActiveOrder(order))}
-            <button class="secondary" onclick="App.closePaymentModal()">取消</button>
+            <button onclick="App.submitPayment(${order.id}, this)" ${isSubmitting ? "disabled" : ""}>${isSubmitting ? "提交中..." : "提交管理员审核"}</button>
+            ${isSubmitting ? "" : specialOrderActionButton(order, state.data.me.role === "sales" && isActiveOrder(order))}
+            <button class="secondary" onclick="App.closePaymentModal()" ${isSubmitting ? "disabled" : ""}>取消</button>
           </div>
         </section>
       </div>
@@ -6991,10 +6993,12 @@ const App = (() => {
       setTimeout(() => this.orderTypeChanged(), 0);
     },
     openPaymentModal(orderId) {
+      if (state.paymentSubmittingOrderId) return;
       state.paymentModalOrderId = orderId;
       render();
     },
     closePaymentModal() {
+      if (state.paymentSubmittingOrderId) return;
       state.paymentModalOrderId = null;
       render();
     },
@@ -7581,7 +7585,14 @@ const App = (() => {
         return result;
       }, "订单已创建，展位已预留");
     },
-    async submitPayment(orderId) {
+    async submitPayment(orderId, button) {
+      if (state.paymentSubmittingOrderId) return;
+      state.paymentSubmittingOrderId = orderId;
+      const originalText = button?.textContent || "提交管理员审核";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "提交中...";
+      }
       const result = await run(async () => {
         const amount = Number(byId("payment-amount")?.value || 0);
         if (amount <= 0) throw new Error("请填写收款金额");
@@ -7592,10 +7603,15 @@ const App = (() => {
           body: { amount, voucherAttachmentId: attachment ? attachment.id : null }
         });
       }, "水单已提交，等待管理员审核");
+      state.paymentSubmittingOrderId = null;
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
       if (result) {
         state.paymentModalOrderId = null;
-        render();
       }
+      render();
     },
     openAttachmentPreview(id) {
       state.attachmentPreviewId = Number(id);
