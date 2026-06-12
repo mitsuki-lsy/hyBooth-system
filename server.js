@@ -927,6 +927,43 @@ function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
   });
 }
 
+function isLikelyDuplicatePayment(left, right) {
+  if (!left || !right) return false;
+  if (Number(left.id) === Number(right.id)) return false;
+  if (Number(left.orderId) !== Number(right.orderId)) return false;
+  if (Number(left.amount || 0) !== Number(right.amount || 0)) return false;
+  if (String(left.paidAt || "") !== String(right.paidAt || "")) return false;
+  if (left.createdBy && right.createdBy && Number(left.createdBy) !== Number(right.createdBy)) return false;
+  const leftCreated = new Date(left.createdAt || 0).getTime();
+  const rightCreated = new Date(right.createdAt || 0).getTime();
+  if (!Number.isFinite(leftCreated) || !Number.isFinite(rightCreated)) return false;
+  const rightReviewed = new Date(right.reviewedAt || 0).getTime();
+  if (!Number.isFinite(rightReviewed) || leftCreated > rightReviewed) return false;
+  return Math.abs(leftCreated - rightCreated) <= 10 * 60 * 1000;
+}
+
+function autoRejectDuplicatePendingPayments(db, actor = null) {
+  let changed = false;
+  const affectedOrderIds = new Set();
+  db.payments
+    .filter((payment) => payment.status === "pending")
+    .forEach((payment) => {
+      const approvedDuplicate = db.payments.find((item) => item.status === "approved" && isLikelyDuplicatePayment(payment, item));
+      if (!approvedDuplicate) return;
+      payment.status = "rejected";
+      payment.reviewedBy = actor?.id || approvedDuplicate.reviewedBy || null;
+      payment.reviewedAt = nowIso();
+      payment.reviewRemark = "同订单已有相同水单审核通过，自动驳回重复提交";
+      affectedOrderIds.add(Number(payment.orderId));
+      changed = true;
+    });
+  affectedOrderIds.forEach((orderId) => {
+    const order = db.orders.find((item) => Number(item.id) === Number(orderId));
+    if (order) recalcOrder(db, order);
+  });
+  return changed;
+}
+
 function restoreOrderCompanyToNewLead(db, order, reason, actor) {
   if (!order) return null;
   const company = db.companies.find((item) => Number(item.id) === Number(order.companyId));
@@ -2558,8 +2595,9 @@ async function handleApi(req, res, url, body = {}) {
   if (!user) return sendError(res, 401, "请先登录");
   applySessionEvent(db, session);
   const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
+  const duplicatePaymentsChanged = autoRejectDuplicatePendingPayments(db);
   const remindersChanged = syncWorkflowReminders(db);
-  const workflowChanged = leadsChanged || remindersChanged;
+  const workflowChanged = leadsChanged || duplicatePaymentsChanged || remindersChanged;
   if (workflowChanged) saveDb(db);
 
   if (pathname === "/api/auth/logout" && method === "POST") {
@@ -3939,12 +3977,12 @@ async function handleApi(req, res, url, body = {}) {
     payment.reviewRemark = reviewRemarkFromBody(body);
     if (payment.status === "approved") {
       db.payments
-        .filter((item) => Number(item.orderId) === Number(order.id) && item.id !== payment.id && item.status === "pending")
+        .filter((item) => item.status === "pending" && isLikelyDuplicatePayment(item, payment))
         .forEach((item) => {
           item.status = "rejected";
           item.reviewedBy = user.id;
           item.reviewedAt = nowIso();
-          item.reviewRemark = "同订单已有水单审核通过，自动驳回重复提交";
+          item.reviewRemark = "同订单已有相同水单审核通过，自动驳回重复提交";
         });
     }
     recalcOrder(db, order);
@@ -4337,8 +4375,9 @@ async function runWorkflowMaintenance() {
   await withApiLock(() => {
     const db = loadDb();
     const leadsChanged = syncCustomerLeadsForCurrentEvent(db);
+    const duplicatePaymentsChanged = autoRejectDuplicatePendingPayments(db);
     const remindersChanged = syncWorkflowReminders(db);
-    if (leadsChanged || remindersChanged) saveDb(db);
+    if (leadsChanged || duplicatePaymentsChanged || remindersChanged) saveDb(db);
   });
 }
 
