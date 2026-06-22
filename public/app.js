@@ -6591,10 +6591,10 @@ const App = (() => {
             type: drawing.type,
             shape: state.obstacleShape,
             boothId,
-            x: Math.round(rect.x),
-            y: Math.round(rect.y),
-            width: Math.round(rect.width),
-            height: Math.round(rect.height)
+            x: preciseCoord(rect.x),
+            y: preciseCoord(rect.y),
+            width: preciseCoord(rect.width),
+            height: preciseCoord(rect.height)
           }
         }), drawing.type === "internal" ? "展位内障碍物已创建，展位价格已重新计算" : "展位外障碍物已创建");
         restoreMapScroll(scroll);
@@ -6629,7 +6629,7 @@ const App = (() => {
             }
             const result = await run(() => api(`/api/obstacles/${obstacle.id}`, {
               method: "PUT",
-              body: { x: Math.round(obstacle.x), y: Math.round(obstacle.y) }
+              body: { x: preciseCoord(obstacle.x), y: preciseCoord(obstacle.y) }
             }), "障碍物位置已自动保存", { refresh: false, apply: applyObstacleResult, silent: true });
             if (!result) {
               const current = (state.data.obstacles || []).find((item) => item.id === drag.obstacleId);
@@ -6923,13 +6923,13 @@ const App = (() => {
       const result = await run(() => api(`/api/obstacles/${obstacle.id}`, {
         method: "PUT",
         body: {
-          x: Math.round(next.rect.x),
-          y: Math.round(next.rect.y),
+          x: preciseCoord(next.rect.x),
+          y: preciseCoord(next.rect.y),
           shape,
           widthM: Number(widthM.toFixed(3)),
           depthM: Number(depthM.toFixed(3)),
-          width: Math.round(next.rect.width),
-          height: Math.round(next.rect.height)
+          width: preciseCoord(next.rect.width),
+          height: preciseCoord(next.rect.height)
         }
       }), "障碍物尺寸已保存，相关展位价格已重新计算", { refresh: false, apply: applyObstacleResult });
       if (result) {
