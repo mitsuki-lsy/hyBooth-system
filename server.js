@@ -1854,12 +1854,20 @@ function canDeleteBooth(db, booth) {
   return !activeOrderUsesBooth(db, booth.id);
 }
 
+function preciseCoord(value, digits = 3) {
+  return Number(Number(value || 0).toFixed(digits));
+}
+
 function rectInsideBooth(rect, booth) {
+  const epsilon = 0.01;
   const left = Number(booth.x || 0);
   const top = Number(booth.y || 0);
   const right = left + Number(booth.width || 0);
   const bottom = top + Number(booth.height || 0);
-  return rect.x >= left && rect.y >= top && rect.x + rect.width <= right && rect.y + rect.height <= bottom;
+  return Number(rect.x || 0) + epsilon >= left
+    && Number(rect.y || 0) + epsilon >= top
+    && Number(rect.x || 0) + Number(rect.width || 0) <= right + epsilon
+    && Number(rect.y || 0) + Number(rect.height || 0) <= bottom + epsilon;
 }
 
 function scaleBoothsToMap(db, oldWidth, oldHeight, newWidth, newHeight) {
@@ -3278,10 +3286,10 @@ async function handleApi(req, res, url, body = {}) {
       shape,
       boothId,
       label: String(body.label || (type === "internal" ? "展位内障碍物" : "展位外障碍物")).trim(),
-      x: Math.round(rect.x),
-      y: Math.round(rect.y),
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
+      x: preciseCoord(rect.x),
+      y: preciseCoord(rect.y),
+      width: preciseCoord(rect.width),
+      height: preciseCoord(rect.height),
       widthM,
       depthM,
       area: obstacleAreaFromSize(widthM, depthM, shape),
@@ -3313,8 +3321,8 @@ async function handleApi(req, res, url, body = {}) {
     const next = {
       x: body.x !== undefined ? Number(body.x) : Number(obstacle.x || 0),
       y: body.y !== undefined ? Number(body.y) : Number(obstacle.y || 0),
-      width: hasSizeChange ? Math.round(widthM * scale) : Math.round(Number(obstacle.width || 0)),
-      height: hasSizeChange ? Math.round(depthM * scale) : Math.round(Number(obstacle.height || 0))
+      width: hasSizeChange ? preciseCoord(widthM * scale) : preciseCoord(Number(obstacle.width || 0)),
+      height: hasSizeChange ? preciseCoord(depthM * scale) : preciseCoord(Number(obstacle.height || 0))
     };
     if (next.width < 4 || next.height < 4) return sendError(res, 400, "障碍物尺寸太小");
     const booth = obstacle.boothId ? db.booths.find((item) => item.id === Number(obstacle.boothId)) : null;
@@ -3322,10 +3330,10 @@ async function handleApi(req, res, url, body = {}) {
       if (!booth || !rectInsideBooth(next, booth)) return sendError(res, 400, "展位内障碍物必须完整保留在绑定展位内部");
       if (!["available", "disabled"].includes(booth.status)) return sendError(res, 409, "只能调整空闲或停用展位内的障碍物");
     }
-    obstacle.x = Math.round(next.x);
-    obstacle.y = Math.round(next.y);
-    obstacle.width = Math.round(next.width);
-    obstacle.height = Math.round(next.height);
+    obstacle.x = preciseCoord(next.x);
+    obstacle.y = preciseCoord(next.y);
+    obstacle.width = preciseCoord(next.width);
+    obstacle.height = preciseCoord(next.height);
     obstacle.shape = nextShape;
     if (hasSizeChange || hasShapeChange) {
       obstacle.widthM = Number(widthM.toFixed(3));
