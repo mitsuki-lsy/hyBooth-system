@@ -1227,12 +1227,16 @@ function eventOrderCount(db, eventId) {
 
 function userOrderCount(db, userId) {
   const idValue = Number(userId);
-  const orderRefs = (db.orders || []).filter((order) => (
-    Number(order.salespersonId) === idValue
-    || Number(order.enterpriseUserId) === idValue
-  )).length;
   const directUser = (db.users || []).find((item) => Number(item.id) === idValue);
-  return orderRefs + (directUser?.orderId ? 1 : 0);
+  const directOrderId = Number(directUser?.orderId || 0);
+  return (db.orders || []).filter((order) => (
+    isActiveOrder(order)
+    && (
+      Number(order.salespersonId) === idValue
+      || Number(order.enterpriseUserId) === idValue
+      || (directOrderId && Number(order.id) === directOrderId)
+    )
+  )).length;
 }
 
 function companyNameKey(value) {
@@ -2420,22 +2424,23 @@ function dashboard(db, user) {
   const visibleOrders = isAdminLike(user)
     ? eventOrders
     : eventOrders.filter((order) => order.salespersonId === user.id || order.id === user.orderId);
-  const boothIds = new Set(visibleOrders.flatMap((order) => order.boothIds || []));
+  const activeVisibleOrders = visibleOrders.filter((order) => isActiveOrder(order));
+  const boothIds = new Set(activeVisibleOrders.flatMap((order) => order.boothIds || []));
   const visibleBooths = user.role === "enterprise" ? db.booths.filter((booth) => boothIds.has(booth.id)) : eventBooths;
-  const totalAmount = visibleOrders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
-  const paidAmount = visibleOrders.reduce((sum, order) => sum + Number(order.paidApprovedAmount || 0), 0);
+  const totalAmount = activeVisibleOrders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
+  const paidAmount = activeVisibleOrders.reduce((sum, order) => sum + Number(order.paidApprovedAmount || 0), 0);
   const departments = db.settings.departments || [];
   const usersById = new Map(db.users.map((item) => [Number(item.id), item]));
   const boothsById = new Map(eventBooths.map((item) => [Number(item.id), item]));
   const orderBoothCount = (order) => boothEquivalentCount((order.boothIds || [])
     .map((boothId) => boothsById.get(Number(boothId)))
     .filter(Boolean));
-  const visibleBoothOrders = visibleOrders.filter((order) => order.type === "booth" && isActiveOrder(order));
+  const visibleBoothOrders = activeVisibleOrders.filter((order) => order.type === "booth");
   const reservedBoothCount = visibleBoothOrders
     .filter((order) => order.status !== "sold" && Number(order.paidApprovedAmount || 0) <= 0)
     .reduce((sum, order) => sum + orderBoothCount(order), 0);
   const departmentRows = new Map();
-  visibleOrders.filter((order) => !isClosedOrderStatus(order.status)).forEach((order) => {
+  activeVisibleOrders.forEach((order) => {
     const salesperson = usersById.get(Number(order.salespersonId));
     const departmentId = Number(salesperson?.departmentId || 0);
     const key = departmentId || "none";
@@ -2491,8 +2496,8 @@ function dashboard(db, user) {
     totalAmount,
     paidAmount,
     unpaidAmount: Math.max(0, totalAmount - paidAmount),
-    orderCount: visibleOrders.length,
-    soldOrderCount: visibleOrders.filter((order) => order.status === "sold").length,
+    orderCount: activeVisibleOrders.length,
+    soldOrderCount: activeVisibleOrders.filter((order) => order.status === "sold").length,
     departmentStats
   };
 }

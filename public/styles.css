@@ -461,6 +461,47 @@ label {
   font-size: 16px;
 }
 
+.collapsible-section {
+  padding: 0;
+  overflow: hidden;
+}
+
+.section-dropdown-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 18px 20px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.section-dropdown-title:hover,
+.section-dropdown-title.open {
+  background: #f6f9fd;
+  color: var(--text);
+}
+
+.section-dropdown-title strong {
+  display: block;
+  font-size: 16px;
+}
+
+.section-dropdown-title small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.section-dropdown-body {
+  padding: 0 20px 20px;
+}
+
 .section-title-row {
   display: flex;
   align-items: center;
