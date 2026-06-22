@@ -7,6 +7,7 @@ const App = (() => {
     loginEventCategory: "",
     view: "dashboard",
     openMenuGroups: new Set(["customer-data", "event-related"]),
+    openAccountGroups: new Set(["system", "enterprise"]),
     error: "",
     message: "",
     selectedBoothIds: new Set(),
@@ -1028,10 +1029,15 @@ const App = (() => {
   function userOrderCount(userId) {
     const idValue = Number(userId);
     const user = (state.data?.users || []).find((item) => Number(item.id) === idValue);
+    const directOrderId = Number(user?.orderId || 0);
     return (state.data?.orders || []).filter((order) => (
-      Number(order.salespersonId) === idValue
-      || Number(order.enterpriseUserId) === idValue
-    )).length + (user?.orderId ? 1 : 0);
+      isActiveOrder(order)
+      && (
+        Number(order.salespersonId) === idValue
+        || Number(order.enterpriseUserId) === idValue
+        || (directOrderId && Number(order.id) === directOrderId)
+      )
+    )).length;
   }
 
   function settingsTab() {
@@ -1643,7 +1649,8 @@ const App = (() => {
 
   function metrics() {
     const role = state.data.me.role;
-    const orders = isAdminLikeRole(role) ? state.data.orders : state.data.orders.filter((order) => order.salespersonId === state.data.me.id);
+    const visibleOrders = isAdminLikeRole(role) ? state.data.orders : state.data.orders.filter((order) => order.salespersonId === state.data.me.id);
+    const orders = visibleOrders.filter((order) => isActiveOrder(order));
     const booths = role === "enterprise"
       ? state.data.booths.filter((booth) => orders.some((order) => (order.boothIds || []).includes(booth.id)))
       : state.data.booths;
@@ -1983,7 +1990,7 @@ const App = (() => {
       ? state.data.users.filter((user) => user.role === "sales")
       : [state.data.me];
     const bySales = salesUsers.map((sales) => {
-      const orders = state.data.orders.filter((order) => order.salespersonId === sales.id);
+      const orders = state.data.orders.filter((order) => order.salespersonId === sales.id && isActiveOrder(order));
       const boothOrders = activeBoothOrders(orders);
       const amount = orders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
       const paid = orders.reduce((sum, order) => sum + Number(order.paidApprovedAmount || 0), 0);
@@ -2028,7 +2035,7 @@ const App = (() => {
       .filter((bucket) => isAdminLikeRole(state.data.me.role) || bucket.salesUsers.some((sales) => Number(sales.id) === Number(state.data.me.id)))
       .map((bucket) => {
         const salesIds = new Set(bucket.salesUsers.map((sales) => Number(sales.id)));
-        const orders = state.data.orders.filter((order) => salesIds.has(Number(order.salespersonId)));
+        const orders = state.data.orders.filter((order) => salesIds.has(Number(order.salespersonId)) && isActiveOrder(order));
         const boothOrders = activeBoothOrders(orders);
         const amount = orders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
         const paid = orders.reduce((sum, order) => sum + Number(order.paidApprovedAmount || 0), 0);
@@ -3000,7 +3007,7 @@ const App = (() => {
       const grayed = salesMapBoothDimmed(booth);
       const status = boothSalesMapStatus(booth);
       const fill = salesMapBoothFill(booth, grayed);
-      const textVisible = booth.width >= 32 && booth.height >= 22;
+      const textVisible = boothMapLabelVisible(booth);
       return `
         <g data-booth-id="${booth.id}" class="sales-booth-group">
           <title>${h(salesBoothTooltip(booth))}</title>
@@ -3181,13 +3188,37 @@ const App = (() => {
     return [booth.boothNo, company.shortName || company.name || ""].filter(Boolean);
   }
 
+  function boothMapLabelUnitWidth(value) {
+    return [...String(value || "")].reduce((total, char) => (
+      total + (/[\u2e80-\u9fff\uff00-\uffef]/.test(char) ? 1 : 0.62)
+    ), 0) || 1;
+  }
+
+  function boothMapLabelFontSize(booth) {
+    const lines = boothMapLabelLines(booth).map((line) => String(line || "")).filter(Boolean);
+    const width = Number(booth.width || 0);
+    const height = Number(booth.height || 0);
+    if (!lines.length || width < 8 || height < 8) return 0;
+    const maxLineWidth = Math.max(...lines.map(boothMapLabelUnitWidth));
+    const horizontalFit = (width - 4) / maxLineWidth;
+    const verticalFit = (height - 4) / (lines.length > 1 ? lines.length * 1.2 : 1.25);
+    const size = Math.min(10, horizontalFit, verticalFit);
+    return size >= 5 ? Number(size.toFixed(1)) : 0;
+  }
+
+  function boothMapLabelVisible(booth) {
+    return boothMapLabelFontSize(booth) > 0;
+  }
+
   function boothMapLabelSvg(booth) {
     const x = Number(booth.x || 0) + Number(booth.width || 0) / 2;
     const y = Number(booth.y || 0) + Number(booth.height || 0) / 2;
     const lines = boothMapLabelLines(booth);
-    if (lines.length <= 1) return `<text class="booth-text" x="${x}" y="${y}">${h(lines[0] || "")}</text>`;
+    const fontSize = boothMapLabelFontSize(booth);
+    if (!fontSize) return "";
+    if (lines.length <= 1) return `<text class="booth-text" style="font-size:${fontSize}px" x="${x}" y="${y}">${h(lines[0] || "")}</text>`;
     return `
-      <text class="booth-text booth-text-multiline" x="${x}" y="${y}">
+      <text class="booth-text booth-text-multiline" style="font-size:${fontSize}px" x="${x}" y="${y}">
         <tspan x="${x}" dy="-0.55em">${h(lines[0])}</tspan>
         <tspan x="${x}" dy="1.15em">${h(lines[1])}</tspan>
       </text>
@@ -3326,7 +3357,7 @@ const App = (() => {
       const selected = state.selectedBoothIds.has(booth.id) || state.selectedBoothId === booth.id;
       const base = state.selectedBoothIds.has(booth.id) && state.selectedBoothId === booth.id;
       const competitive = isCompetitiveBooth(booth);
-      const textVisible = booth.width >= 32 && booth.height >= 22;
+      const textVisible = boothMapLabelVisible(booth);
       return `
         <g data-booth-id="${booth.id}" onclick="App.boothClick(event, ${booth.id})">
           <title>${h(salesBoothTooltip(booth))}</title>
@@ -3803,12 +3834,12 @@ const App = (() => {
       const selected = state.pendingBoothIds.includes(booth.id);
       const focused = state.boothPickerFocusId === booth.id;
       const selectable = isBoothOrderable(booth);
-      const textVisible = booth.width >= 32 && booth.height >= 22;
+      const textVisible = boothMapLabelVisible(booth);
       return `
         <g data-booth-id="${booth.id}" onclick="App.pickerBoothClick(event, ${booth.id})">
           <title>${h(salesBoothTooltip(booth))}</title>
           <rect class="booth-rect ${h(booth.status)} ${isCompetitiveBooth(booth) ? "competitive" : ""} ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${selectable ? "" : "unselectable"}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
+          ${textVisible ? boothMapLabelSvg(booth) : ""}
         </g>
       `;
     }).join("");
@@ -4100,11 +4131,11 @@ const App = (() => {
       const selected = state.changePickerBoothIds.includes(booth.id);
       const focused = state.changePickerFocusId === booth.id;
       const selectable = booth.status === "available";
-      const textVisible = booth.width >= 32 && booth.height >= 22;
+      const textVisible = boothMapLabelVisible(booth);
       return `
         <g data-booth-id="${booth.id}" onclick="App.changeBoothClick(event, ${booth.id})">
           <rect class="booth-rect ${h(booth.status)} ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${selectable ? "" : "unselectable"}" x="${booth.x}" y="${booth.y}" width="${booth.width}" height="${booth.height}" rx="2"></rect>
-          ${textVisible ? `<text class="booth-text" x="${booth.x + booth.width / 2}" y="${booth.y + booth.height / 2}">${h(booth.boothNo)}</text>` : ""}
+          ${textVisible ? boothMapLabelSvg(booth) : ""}
         </g>
       `;
     }).join("");
@@ -4203,28 +4234,37 @@ const App = (() => {
 
   function approvalHistoryRows() {
     const rows = [];
+    const canSeeReviewBy = (reviewerId) => {
+      if (state.data.me.role !== "manager") return true;
+      return getUser(reviewerId).role !== "admin";
+    };
+    const pushHistoryRow = (reviewerId, row) => {
+      if (!canSeeReviewBy(reviewerId)) return;
+      rows.push({
+        ...row,
+        reviewer: getUser(reviewerId).displayName || "-"
+      });
+    };
     (state.data.customerLeads || []).forEach((lead) => {
       const company = getCompany(lead.companyId);
       const owner = getUser(lead.ownerSalesId);
       if (isFinalReviewStatus(lead.contractReviewStatus)) {
-        rows.push({
+        pushHistoryRow(lead.contractReviewedBy, {
           at: lead.contractReviewedAt || lead.updatedAt || lead.createdAt,
           flow: "客户合同审核",
           target: company.name || "-",
           submitter: owner.displayName || owner.username || "-",
           result: lead.contractReviewStatus,
-          reviewer: getUser(lead.contractReviewedBy).displayName || "-",
           remark: lead.contractReviewRemark || ""
         });
       }
       if (isFinalReviewStatus(lead.voucherReviewStatus)) {
-        rows.push({
+        pushHistoryRow(lead.voucherReviewedBy, {
           at: lead.voucherReviewedAt || lead.updatedAt || lead.createdAt,
           flow: "客户水单审核",
           target: company.name || "-",
           submitter: owner.displayName || owner.username || "-",
           result: lead.voucherReviewStatus,
-          reviewer: getUser(lead.voucherReviewedBy).displayName || "-",
           remark: lead.voucherReviewRemark || ""
         });
       }
@@ -4232,13 +4272,12 @@ const App = (() => {
     (state.data.payments || []).filter((payment) => isFinalReviewStatus(payment.status)).forEach((payment) => {
       const order = state.data.orders.find((item) => item.id === payment.orderId) || {};
       const company = getCompany(order.companyId);
-      rows.push({
+      pushHistoryRow(payment.reviewedBy, {
         at: payment.reviewedAt || payment.createdAt,
         flow: "销售订单水单审核",
         target: `${order.orderNo || "-"} · ${company.name || "-"}`,
         submitter: getUser(order.salespersonId).displayName || "-",
         result: payment.status,
-        reviewer: getUser(payment.reviewedBy).displayName || "-",
         remark: `${money(payment.amount)} ${payment.reviewRemark || ""}`.trim()
       });
     });
@@ -4246,37 +4285,34 @@ const App = (() => {
       const order = state.data.orders.find((item) => item.id === profile.orderId) || {};
       const company = getCompany(profile.companyId);
       if (isFinalReviewStatus(profile.fascia?.status)) {
-        rows.push({
+        pushHistoryRow(profile.fascia.reviewedBy, {
           at: profile.fascia.reviewedAt || profile.updatedAt,
           flow: "楣板审核",
           target: `${company.name || "-"} · ${profile.fascia.requestedName || "-"}`,
           submitter: getUser(order.salespersonId).displayName || "-",
           result: profile.fascia.status,
-          reviewer: getUser(profile.fascia.reviewedBy).displayName || "-",
           remark: profile.fascia.reviewRemark || ""
         });
       }
       (profile.rentals || []).filter((rental) => isFinalReviewStatus(rental.status)).forEach((rental) => {
-        rows.push({
+        pushHistoryRow(rental.reviewedBy, {
           at: rental.reviewedAt || profile.updatedAt || rental.createdAt,
           flow: "展具增租审核",
           target: `${company.name || "-"} · ${rental.furnitureName} x ${rental.qty}`,
           submitter: getUser(order.salespersonId).displayName || "-",
           result: rental.status,
-          reviewer: getUser(rental.reviewedBy).displayName || "-",
           remark: rental.reviewRemark || ""
         });
       });
     });
     (state.data.changeRequests || []).filter((request) => isFinalReviewStatus(request.status)).forEach((request) => {
       const order = state.data.orders.find((item) => item.id === request.orderId) || {};
-      rows.push({
+      pushHistoryRow(request.reviewedBy, {
         at: request.reviewedAt || request.createdAt,
         flow: "订单变更审核",
         target: `${order.orderNo || "-"} · ${request.type || "-"}`,
         submitter: getUser(request.createdBy).displayName || "-",
         result: request.status,
-        reviewer: getUser(request.reviewedBy).displayName || "-",
         remark: request.reviewRemark || request.appliedDetail || request.detail || ""
       });
     });
@@ -4565,10 +4601,108 @@ const App = (() => {
     `;
   }
 
+  function enterpriseAccountRows() {
+    const orders = (state.data.orders || [])
+      .filter((order) => order.type === "booth" && order.status === "sold")
+      .sort((a, b) => (getCompany(a.companyId).name || "").localeCompare(getCompany(b.companyId).name || "", "zh-CN"));
+    const usedUserIds = new Set();
+    const rows = orders.map((order) => {
+      const user = (state.data.users || []).find((item) => (
+        item.role === "enterprise"
+        && (
+          Number(item.id) === Number(order.enterpriseUserId)
+          || Number(item.orderId) === Number(order.id)
+          || Number(item.companyId) === Number(order.companyId)
+        )
+      )) || null;
+      if (user?.id) usedUserIds.add(Number(user.id));
+      return { order, company: getCompany(order.companyId), user };
+    });
+    (state.data.users || [])
+      .filter((user) => user.role === "enterprise" && !usedUserIds.has(Number(user.id)))
+      .forEach((user) => {
+        const order = (state.data.orders || []).find((item) => Number(item.id) === Number(user.orderId)) || null;
+        rows.push({ order, company: getCompany(user.companyId || order?.companyId), user });
+      });
+    return rows;
+  }
+
+  function accountDropdownSection(key, title, countText, bodyHtml) {
+    const open = state.openAccountGroups.has(key);
+    return `
+      <section class="section collapsible-section">
+        <button type="button" class="section-dropdown-title ${open ? "open" : ""}" onclick="App.toggleAccountGroup('${key}')">
+          <span>
+            <strong>${h(title)}</strong>
+            <small>${h(countText)}</small>
+          </span>
+          <span class="nav-arrow">${open ? "v" : "›"}</span>
+        </button>
+        ${open ? `<div class="section-dropdown-body">${bodyHtml}</div>` : ""}
+      </section>
+    `;
+  }
+
   function viewAccounts() {
     const users = state.data.users.slice().sort((a, b) => a.id - b.id);
+    const systemUsers = users.filter((user) => user.role !== "enterprise");
+    const enterpriseRows = enterpriseAccountRows();
     const departments = departmentList();
     if (!isSuperAdminRole(state.data.me.role)) return selfPasswordSection();
+    const systemAccountsHtml = `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>姓名</th><th>账号</th><th>角色</th><th>部门</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
+          <tbody>
+            ${systemUsers.map((user) => `
+              <tr>
+                <td>${user.id}</td>
+                <td>${h(user.displayName)}</td>
+                <td>${h(user.username)}</td>
+                <td>${roleText(user.role)}</td>
+                <td>${["manager", "sales"].includes(user.role) ? `<select onchange="App.assignUserDepartment(${user.id}, this.value)">${departmentOptions(user.departmentId)}</select>` : "-"}</td>
+                <td>${user.active ? "启用" : "停用"}</td>
+                <td>${date(user.lastLoginAt)}</td>
+                <td>
+                  ${userOrderCount(user.id) === 0 && Number(user.id) !== Number(state.data.me.id)
+                    ? `<button class="tiny danger" onclick="App.deleteUser(${user.id})">删除</button>`
+                    : `<span class="hint">${Number(user.id) === Number(state.data.me.id) ? "当前账号" : `${userOrderCount(user.id)} 个订单`}</span>`}
+                </td>
+              </tr>
+            `).join("") || `<tr><td colspan="8" class="empty">暂无系统账号</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+    const enterpriseAccountsHtml = `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>企业</th><th>订单</th><th>展位</th><th>账号</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
+          <tbody>
+            ${enterpriseRows.map(({ order, company, user }) => {
+              const canIssue = order?.id && order.type === "booth" && order.status === "sold";
+              return `
+                <tr>
+                  <td>${h(company.name || user?.displayName || "-")}</td>
+                  <td>${order?.orderNo ? `${h(order.orderNo)}<div class="hint">${h(getUser(order.salespersonId).displayName || "-")}</div>` : "-"}</td>
+                  <td>${order?.id ? h(orderBoothNos(order) || "-") : "-"}</td>
+                  <td>${user ? `${h(user.username)}<div class="hint">ID ${user.id}</div>` : `<span class="hint">未生成</span>`}</td>
+                  <td>${user ? (user.active ? "启用" : "停用") : "-"}</td>
+                  <td>${user ? date(user.lastLoginAt) : "-"}</td>
+                  <td>
+                    ${canIssue
+                      ? (!user
+                        ? `<button class="tiny" onclick="App.issueEnterpriseAccount(${order.id})">生成账号</button>`
+                        : `<button class="tiny secondary" onclick="App.issueEnterpriseAccount(${order.id})">重置密码</button>`)
+                      : `<span class="hint">-</span>`}
+                  </td>
+                </tr>
+              `;
+            }).join("") || `<tr><td colspan="7" class="empty">暂无参展企业账号</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
     return `
       ${selfPasswordSection()}
       <section class="section">
@@ -4585,7 +4719,7 @@ const App = (() => {
             <thead><tr><th>ID</th><th>部门名称</th><th>成员数</th><th>操作</th></tr></thead>
             <tbody>
               ${departments.map((department) => {
-                const memberCount = users.filter((user) => Number(user.departmentId || 0) === Number(department.id)).length;
+                const memberCount = systemUsers.filter((user) => Number(user.departmentId || 0) === Number(department.id)).length;
                 return `
                   <tr>
                     <td>${department.id}</td>
@@ -4613,32 +4747,8 @@ const App = (() => {
         </div>
         <div class="split-actions" style="margin-top:14px"><button onclick="App.createUser()">创建账号</button></div>
       </section>
-      <section class="section">
-        <h2>账号列表</h2>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>ID</th><th>姓名</th><th>账号</th><th>角色</th><th>部门</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
-            <tbody>
-              ${users.map((user) => `
-                <tr>
-                  <td>${user.id}</td>
-                  <td>${h(user.displayName)}</td>
-                  <td>${h(user.username)}</td>
-                  <td>${roleText(user.role)}</td>
-                  <td>${["manager", "sales"].includes(user.role) ? `<select onchange="App.assignUserDepartment(${user.id}, this.value)">${departmentOptions(user.departmentId)}</select>` : "-"}</td>
-                  <td>${user.active ? "启用" : "停用"}</td>
-                  <td>${date(user.lastLoginAt)}</td>
-                  <td>
-                    ${userOrderCount(user.id) === 0 && Number(user.id) !== Number(state.data.me.id)
-                      ? `<button class="tiny danger" onclick="App.deleteUser(${user.id})">删除</button>`
-                      : `<span class="hint">${Number(user.id) === Number(state.data.me.id) ? "当前账号" : `${userOrderCount(user.id)} 个订单`}</span>`}
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      ${accountDropdownSection("system", "系统账号", `${systemUsers.length} 个账号`, systemAccountsHtml)}
+      ${accountDropdownSection("enterprise", "参展企业账号", `${enterpriseRows.length} 个企业`, enterpriseAccountsHtml)}
       <section class="section">
         <h2>操作日志</h2>
         <div class="table-wrap">
@@ -5450,6 +5560,14 @@ const App = (() => {
         state.openMenuGroups.delete(key);
       } else {
         state.openMenuGroups.add(key);
+      }
+      render();
+    },
+    toggleAccountGroup(key) {
+      if (state.openAccountGroups.has(key)) {
+        state.openAccountGroups.delete(key);
+      } else {
+        state.openAccountGroups.add(key);
       }
       render();
     },
