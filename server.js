@@ -3159,7 +3159,9 @@ async function handleApi(req, res, url, body = {}) {
     const booth = db.booths.find((item) => item.id === Number(boothMatch[1]) && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
     if (!booth) return sendError(res, 404, "展位不存在");
     if (!canAccessBoothDepartment(db, user, booth)) return sendError(res, 403, "该展位不属于当前部门，不能编辑");
-    if (booth.status === "sold") return sendError(res, 409, "已成交展位不可直接编辑");
+    const bodyKeys = Object.keys(body || {}).filter((key) => body[key] !== undefined);
+    const positionOnlyUpdate = bodyKeys.length > 0 && bodyKeys.every((key) => ["x", "y"].includes(key));
+    if (booth.status === "sold" && !positionOnlyUpdate) return sendError(res, 409, "已成交展位不可直接编辑");
     if (booth.locked && body.locked !== false) return sendError(res, 409, "展位已锁定，请先解锁再编辑");
     if (body.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     if (body.boothNo !== undefined) {
@@ -3201,6 +3203,8 @@ async function handleApi(req, res, url, body = {}) {
     if (!requireRole(user, ["admin"])) return sendError(res, 403, "无权限");
     const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
     const patch = body.patch || {};
+    const patchKeys = Object.keys(patch || {}).filter((key) => patch[key] !== undefined);
+    const hasNonPositionPatch = patchKeys.some((key) => !["x", "y"].includes(key));
     if (patch.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     const positions = new Map((Array.isArray(body.positions) ? body.positions : [])
       .map((item) => [Number(item.id), item]));
@@ -3210,13 +3214,17 @@ async function handleApi(req, res, url, body = {}) {
     if (unauthorizedBooth) return sendError(res, 403, `展位 ${unauthorizedBooth.boothNo} 不属于当前部门，不能批量修改`);
     const changed = [];
     ids.forEach((boothId) => {
-      const booth = db.booths.find((item) => item.id === boothId && item.status !== "sold" && !item.locked && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
+      const booth = db.booths.find((item) => item.id === boothId && !item.locked && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
       if (!booth) return;
-      ["hall", "zone", "attr", "status"].forEach((key) => {
-        if (patch[key] !== undefined) booth[key] = patch[key];
-      });
-      if (patch.departmentId !== undefined) booth.departmentId = Number(patch.departmentId || 0) || null;
-      if (patch.area !== undefined) booth.area = Number(patch.area);
+      if (booth.status === "sold" && hasNonPositionPatch) return;
+      const canApplyNonPositionPatch = booth.status !== "sold";
+      if (canApplyNonPositionPatch) {
+        ["hall", "zone", "attr", "status"].forEach((key) => {
+          if (patch[key] !== undefined) booth[key] = patch[key];
+        });
+        if (patch.departmentId !== undefined) booth.departmentId = Number(patch.departmentId || 0) || null;
+        if (patch.area !== undefined) booth.area = Number(patch.area);
+      }
       ["x", "y"].forEach((key) => {
         if (patch[key] !== undefined) booth[key] = Number(patch[key]);
       });

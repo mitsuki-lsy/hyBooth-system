@@ -6407,7 +6407,7 @@ const App = (() => {
       if (group && !state.drawMode) {
         const boothId = Number(group.dataset.boothId);
         const booth = state.data.booths.find((item) => item.id === boothId);
-        if (!booth || booth.status === "sold" || booth.locked) return;
+        if (!booth || booth.locked) return;
         const start = svgPoint(event);
         beginMapPointerInteraction(event);
         state.selectedBoothId = boothId;
@@ -6416,7 +6416,7 @@ const App = (() => {
         const batchBooths = state.batchDragMode && state.selectedBoothIds.has(boothId)
           ? [...state.selectedBoothIds]
             .map((id) => state.data.booths.find((item) => item.id === id))
-            .filter((item) => item && item.status !== "sold" && !item.locked)
+            .filter((item) => item && !item.locked)
           : [];
         state.dragging = {
           boothId,
