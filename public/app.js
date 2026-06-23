@@ -3194,10 +3194,51 @@ const App = (() => {
     ), 0) || 1;
   }
 
-  function boothMapLabelFontSize(booth) {
-    const lines = boothMapLabelLines(booth).map((line) => String(line || "")).filter(Boolean);
-    const width = Number(booth.width || 0);
-    const height = Number(booth.height || 0);
+  function rectIntersection(a, b) {
+    const x = Math.max(Number(a.x || 0), Number(b.x || 0));
+    const y = Math.max(Number(a.y || 0), Number(b.y || 0));
+    const right = Math.min(Number(a.x || 0) + Number(a.width || 0), Number(b.x || 0) + Number(b.width || 0));
+    const bottom = Math.min(Number(a.y || 0) + Number(a.height || 0), Number(b.y || 0) + Number(b.height || 0));
+    if (right <= x || bottom <= y) return null;
+    return { x, y, width: right - x, height: bottom - y };
+  }
+
+  function splitRectAroundObstacle(rect, obstacleRect) {
+    const hit = rectIntersection(rect, obstacleRect);
+    if (!hit) return [rect];
+    const right = Number(rect.x || 0) + Number(rect.width || 0);
+    const bottom = Number(rect.y || 0) + Number(rect.height || 0);
+    const hitRight = Number(hit.x || 0) + Number(hit.width || 0);
+    const hitBottom = Number(hit.y || 0) + Number(hit.height || 0);
+    return [
+      hit.y > rect.y ? { x: rect.x, y: rect.y, width: rect.width, height: hit.y - rect.y } : null,
+      hitBottom < bottom ? { x: rect.x, y: hitBottom, width: rect.width, height: bottom - hitBottom } : null,
+      hit.x > rect.x ? { x: rect.x, y: hit.y, width: hit.x - rect.x, height: hit.height } : null,
+      hitRight < right ? { x: hitRight, y: hit.y, width: right - hitRight, height: hit.height } : null
+    ].filter((item) => item && item.width >= 4 && item.height >= 4);
+  }
+
+  function boothInternalObstacleRects(booth) {
+    const boothRect = {
+      x: Number(booth.x || 0),
+      y: Number(booth.y || 0),
+      width: Number(booth.width || 0),
+      height: Number(booth.height || 0)
+    };
+    return (state.data.obstacles || [])
+      .filter((obstacle) => obstacle.type === "internal" && Number(obstacle.boothId) === Number(booth.id))
+      .map((obstacle) => rectIntersection(boothRect, {
+        x: Number(obstacle.x || 0),
+        y: Number(obstacle.y || 0),
+        width: Number(obstacle.width || 0),
+        height: Number(obstacle.height || 0)
+      }))
+      .filter(Boolean);
+  }
+
+  function boothMapLabelSizeForRect(lines, rect) {
+    const width = Number(rect.width || 0);
+    const height = Number(rect.height || 0);
     if (!lines.length || width < 8 || height < 8) return 0;
     const maxLineWidth = Math.max(...lines.map(boothMapLabelUnitWidth));
     const horizontalFit = (width - 4) / maxLineWidth;
@@ -3206,15 +3247,62 @@ const App = (() => {
     return size >= 5 ? Number(size.toFixed(1)) : 0;
   }
 
+  function boothMapLabelRect(booth, lines) {
+    const boothRect = {
+      x: Number(booth.x || 0),
+      y: Number(booth.y || 0),
+      width: Number(booth.width || 0),
+      height: Number(booth.height || 0)
+    };
+    const obstacleRects = boothInternalObstacleRects(booth);
+    if (!obstacleRects.length) return boothRect;
+    const candidates = obstacleRects.reduce((rects, obstacleRect) => (
+      rects.flatMap((rect) => splitRectAroundObstacle(rect, obstacleRect))
+    ), [boothRect]);
+    if (!candidates.length) return boothRect;
+    const centerX = boothRect.x + boothRect.width / 2;
+    const centerY = boothRect.y + boothRect.height / 2;
+    return candidates
+      .map((rect) => {
+        const labelSize = boothMapLabelSizeForRect(lines, rect);
+        const rectCenterX = Number(rect.x || 0) + Number(rect.width || 0) / 2;
+        const rectCenterY = Number(rect.y || 0) + Number(rect.height || 0) / 2;
+        return {
+          rect,
+          labelSize,
+          area: Number(rect.width || 0) * Number(rect.height || 0),
+          distance: Math.abs(rectCenterX - centerX) + Math.abs(rectCenterY - centerY)
+        };
+      })
+      .sort((a, b) => (
+        b.labelSize - a.labelSize
+        || b.area - a.area
+        || a.distance - b.distance
+      ))[0].rect;
+  }
+
+  function boothMapLabelLayout(booth) {
+    const lines = boothMapLabelLines(booth).map((line) => String(line || "")).filter(Boolean);
+    const rect = boothMapLabelRect(booth, lines);
+    const fontSize = boothMapLabelSizeForRect(lines, rect);
+    return {
+      lines,
+      fontSize,
+      x: Number(rect.x || 0) + Number(rect.width || 0) / 2,
+      y: Number(rect.y || 0) + Number(rect.height || 0) / 2
+    };
+  }
+
+  function boothMapLabelFontSize(booth) {
+    return boothMapLabelLayout(booth).fontSize;
+  }
+
   function boothMapLabelVisible(booth) {
     return boothMapLabelFontSize(booth) > 0;
   }
 
   function boothMapLabelSvg(booth) {
-    const x = Number(booth.x || 0) + Number(booth.width || 0) / 2;
-    const y = Number(booth.y || 0) + Number(booth.height || 0) / 2;
-    const lines = boothMapLabelLines(booth);
-    const fontSize = boothMapLabelFontSize(booth);
+    const { x, y, lines, fontSize } = boothMapLabelLayout(booth);
     if (!fontSize) return "";
     if (lines.length <= 1) return `<text class="booth-text" style="font-size:${fontSize}px" x="${x}" y="${y}">${h(lines[0] || "")}</text>`;
     return `
@@ -4918,16 +5006,32 @@ const App = (() => {
   }
 
   function updateBoothSvgPosition(booth) {
-    const rect = document.querySelector(`g[data-booth-id="${booth.id}"] rect`);
-    const text = document.querySelector(`g[data-booth-id="${booth.id}"] text`);
+    const group = document.querySelector(`g[data-booth-id="${booth.id}"]`);
+    const rect = group?.querySelector("rect");
+    const text = group?.querySelector("text.booth-text");
     if (rect) {
       rect.setAttribute("x", booth.x);
       rect.setAttribute("y", booth.y);
     }
+    updateBoothLabelSvgPosition(text, booth);
+  }
+
+  function updateBoothLabelSvgPosition(text, booth) {
     if (text) {
-      text.setAttribute("x", Number(booth.x || 0) + Number(booth.width || 0) / 2);
-      text.setAttribute("y", Number(booth.y || 0) + Number(booth.height || 0) / 2);
+      const { x, y, fontSize } = boothMapLabelLayout(booth);
+      if (!fontSize) return;
+      text.setAttribute("x", x);
+      text.setAttribute("y", y);
+      text.style.fontSize = `${fontSize}px`;
+      text.querySelectorAll("tspan").forEach((tspan) => tspan.setAttribute("x", x));
     }
+  }
+
+  function updateBoothLabelForId(boothId) {
+    const booth = state.data.booths.find((item) => Number(item.id) === Number(boothId));
+    if (!booth) return;
+    const text = document.querySelector(`g[data-booth-id="${booth.id}"] text.booth-text`);
+    updateBoothLabelSvgPosition(text, booth);
   }
 
   function rectFromPoints(start, end) {
@@ -5325,17 +5429,17 @@ const App = (() => {
       ctx.lineWidth = state.salesMapFocusId === booth.id ? 5 : status === "competitive" ? 2.4 : 1.4;
       ctx.strokeStyle = state.salesMapFocusId === booth.id ? "#ffcf33" : status === "competitive" ? "#0f766e" : "#ffffff";
       ctx.stroke();
-      if (boothWidth >= 32 && boothHeight >= 22) {
+      const labelLayout = boothMapLabelLayout(booth);
+      if (labelLayout.fontSize) {
         ctx.fillStyle = "#ffffff";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.font = "10px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-        const labelLines = boothMapLabelLines(booth);
-        if (labelLines.length > 1) {
-          ctx.fillText(String(labelLines[0] || ""), x + boothWidth / 2, y + boothHeight / 2 - 6);
-          ctx.fillText(String(labelLines[1] || ""), x + boothWidth / 2, y + boothHeight / 2 + 6);
+        ctx.font = `${labelLayout.fontSize}px Microsoft YaHei, PingFang SC, Arial, sans-serif`;
+        if (labelLayout.lines.length > 1) {
+          ctx.fillText(String(labelLayout.lines[0] || ""), labelLayout.x, labelLayout.y - labelLayout.fontSize * 0.55);
+          ctx.fillText(String(labelLayout.lines[1] || ""), labelLayout.x, labelLayout.y + labelLayout.fontSize * 0.6);
         } else {
-          ctx.fillText(String(labelLines[0] || ""), x + boothWidth / 2, y + boothHeight / 2);
+          ctx.fillText(String(labelLayout.lines[0] || ""), labelLayout.x, labelLayout.y);
         }
       }
     });
@@ -6407,7 +6511,7 @@ const App = (() => {
       if (group && !state.drawMode) {
         const boothId = Number(group.dataset.boothId);
         const booth = state.data.booths.find((item) => item.id === boothId);
-        if (!booth || booth.status === "sold" || booth.locked) return;
+        if (!booth || booth.locked) return;
         const start = svgPoint(event);
         beginMapPointerInteraction(event);
         state.selectedBoothId = boothId;
@@ -6416,7 +6520,7 @@ const App = (() => {
         const batchBooths = state.batchDragMode && state.selectedBoothIds.has(boothId)
           ? [...state.selectedBoothIds]
             .map((id) => state.data.booths.find((item) => item.id === id))
-            .filter((item) => item && item.status !== "sold" && !item.locked)
+            .filter((item) => item && !item.locked)
           : [];
         state.dragging = {
           boothId,
@@ -6489,6 +6593,7 @@ const App = (() => {
           text.setAttribute("x", Number(obstacle.x) + Number(obstacle.width || 0) / 2);
           text.setAttribute("y", Number(obstacle.y) + Number(obstacle.height || 0) / 2);
         }
+        if (obstacle.boothId) updateBoothLabelForId(obstacle.boothId);
         return;
       }
       if (state.activityAreaDragging) {
@@ -6897,6 +7002,7 @@ const App = (() => {
       obstacle.widthM = Number(widthM.toFixed(3));
       obstacle.depthM = Number(depthM.toFixed(3));
       obstacle.area = area;
+      if (obstacle.boothId) updateBoothLabelForId(obstacle.boothId);
       if (obstacle.boothId && next.fits) updateBoothBillingPreview(obstacle.boothId);
     },
     async saveObstacle() {
@@ -7313,7 +7419,7 @@ const App = (() => {
       const width = meterToPx(widthM);
       const height = meterToPx(depthM);
       const rect = document.querySelector(`g[data-booth-id="${booth.id}"] rect`);
-      const text = document.querySelector(`g[data-booth-id="${booth.id}"] text`);
+      const text = document.querySelector(`g[data-booth-id="${booth.id}"] text.booth-text`);
       const areaInput = byId("booth-area");
       const pixelInput = byId("booth-pixel-size");
       if (areaInput) areaInput.value = Number((widthM * depthM).toFixed(2));
@@ -7322,15 +7428,12 @@ const App = (() => {
         rect.setAttribute("width", width);
         rect.setAttribute("height", height);
       }
-      if (text) {
-        text.setAttribute("x", booth.x + width / 2);
-        text.setAttribute("y", booth.y + height / 2);
-      }
       booth.width = width;
       booth.height = height;
       booth.widthM = widthM;
       booth.depthM = depthM;
       booth.area = Number((widthM * depthM).toFixed(2));
+      updateBoothLabelSvgPosition(text, booth);
     },
     async batchUpdateBooths() {
       const selected = selectedAvailableBooths();
