@@ -910,12 +910,17 @@ function materializeOldCustomerLeads(db) {
 }
 
 function syncCustomerLeadsForCurrentEvent(db) {
+  const changedOrderVisibility = syncOrderCustomerVisibility(db);
+  const changedOrphanConverted = restoreOrphanConvertedCustomerLeads(db);
   const changedOld = materializeOldCustomerLeads(db);
   const changedRelease = releaseExpiredCustomerLeads(db);
-  return changedOld || changedRelease;
+  return changedOrderVisibility || changedOrphanConverted || changedOld || changedRelease;
 }
 
 function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
+  const order = activeCurrentOrderForCompany(db, eventId, companyId);
+  if (!order || order.status !== "sold") return false;
+  let changed = false;
   db.customerLeads.forEach((lead) => {
     const sameLead = leadId && Number(lead.id) === Number(leadId);
     const sameCompany = String(lead.eventId) === String(eventId) && Number(lead.companyId) === Number(companyId);
@@ -923,8 +928,224 @@ function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
       lead.status = "converted";
       lead.convertedAt = nowIso();
       lead.publicReason = "";
+      changed = true;
     }
   });
+  return changed;
+}
+
+function ensureCustomerLeadForOrder(db, order) {
+  if (!order || !isActiveOrder(order)) return false;
+  const company = db.companies.find((item) => Number(item.id) === Number(order.companyId));
+  if (!company) return false;
+  let changed = false;
+  const desiredStatus = order.status === "sold" ? "converted" : "protected";
+  let lead = db.customerLeads.find((item) => (
+    String(item.eventId) === String(order.eventId)
+    && Number(item.companyId) === Number(order.companyId)
+  ));
+  if (!lead) {
+    lead = {
+      id: id(db, "customerLead"),
+      eventId: order.eventId,
+      companyId: order.companyId,
+      customerType: "new",
+      status: desiredStatus,
+      ownerSalesId: Number(order.salespersonId || company.ownerSalesId || 0) || null,
+      protectedUntil: desiredStatus === "protected"
+        ? addDays(order.createdAt || nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30))
+        : "",
+      sourceOrderId: null,
+      sourceEventName: "",
+      sourceAmount: 0,
+      contractAttachmentIds: [],
+      voucherAttachmentIds: [],
+      contractReviewStatus: "none",
+      contractReviewedBy: null,
+      contractReviewedAt: "",
+      contractReviewRemark: "",
+      voucherReviewStatus: "none",
+      voucherReviewedBy: null,
+      voucherReviewedAt: "",
+      voucherReviewRemark: "",
+      voucherDueAt: "",
+      publicReason: "",
+      previousOwnerSalesId: null,
+      contactVersions: [],
+      createdAt: order.createdAt || nowIso(),
+      claimedAt: "",
+      releasedAt: "",
+      convertedAt: desiredStatus === "converted" ? (order.updatedAt || order.createdAt || nowIso()) : ""
+    };
+    db.customerLeads.push(lead);
+    changed = true;
+  }
+  if (lead.status !== desiredStatus) {
+    lead.status = desiredStatus;
+    changed = true;
+  }
+  if (!lead.ownerSalesId && order.salespersonId) {
+    lead.ownerSalesId = order.salespersonId;
+    changed = true;
+  }
+  if (desiredStatus === "converted") {
+    if (!lead.convertedAt) {
+      lead.convertedAt = order.updatedAt || order.createdAt || nowIso();
+      changed = true;
+    }
+    if (lead.publicReason || lead.releasedAt) {
+      lead.publicReason = "";
+      lead.releasedAt = "";
+      changed = true;
+    }
+  } else if (!lead.protectedUntil) {
+    lead.protectedUntil = addDays(order.createdAt || nowIso(), Number(db.settings.rules.newCustomerProtectDays ?? 30));
+    changed = true;
+  }
+  if (lead.ownerSalesId) saveLeadContactVersion(db, lead, lead.ownerSalesId, company);
+  return changed;
+}
+
+function syncOrderCustomerVisibility(db) {
+  let changed = false;
+  db.orders.forEach((order) => {
+    if (!order || !isActiveOrder(order)) return;
+    const approved = orderWorkflow.approvedPaymentAmount(db.payments, order.id);
+    const depositRequired = orderWorkflow.depositRequired(db.settings, order);
+    if (Number(order.paidApprovedAmount || 0) !== Number(approved || 0)) {
+      order.paidApprovedAmount = approved;
+      changed = true;
+    }
+    if (Number(order.depositRequired || 0) !== Number(depositRequired || 0)) {
+      order.depositRequired = depositRequired;
+      changed = true;
+    }
+    const shouldBeSold = order.specialApproved || (approved >= depositRequired && Number(order.totalAmount || 0) > 0);
+    if (shouldBeSold && order.status !== "sold") {
+      order.status = "sold";
+      order.updatedAt = nowIso();
+      changed = true;
+    }
+    if (order.status === "sold" && order.type === "booth") {
+      (order.boothIds || []).forEach((boothId) => {
+        const booth = db.booths.find((item) => Number(item.id) === Number(boothId));
+        if (!booth) return;
+        if (booth.status !== "sold") {
+          booth.status = "sold";
+          changed = true;
+        }
+        if (Number(booth.orderId || 0) !== Number(order.id)) {
+          booth.orderId = order.id;
+          changed = true;
+        }
+        if (!booth.reservedBy && order.salespersonId) {
+          booth.reservedBy = order.salespersonId;
+          changed = true;
+        }
+        if (!booth.reservedAt) {
+          booth.reservedAt = order.createdAt || nowIso();
+          changed = true;
+        }
+      });
+      const beforeProfiles = db.profiles.length;
+      ensureProfile(db, order);
+      if (db.profiles.length !== beforeProfiles) changed = true;
+    }
+    changed = ensureCustomerLeadForOrder(db, order) || changed;
+  });
+  return changed;
+}
+
+function mergeUniqueNumberLists(left, right) {
+  return [...new Set([...(left || []), ...(right || [])].map(Number).filter(Boolean))];
+}
+
+function reviewStatusPriority(status) {
+  return { none: 0, pending: 1, rejected: 2, approved: 3 }[status] || 0;
+}
+
+function parsedTime(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function mergeLeadReviewFields(target, source, type) {
+  const prefix = type === "contract" ? "contract" : "voucher";
+  const statusKey = `${prefix}ReviewStatus`;
+  const byKey = `${prefix}ReviewedBy`;
+  const atKey = `${prefix}ReviewedAt`;
+  const remarkKey = `${prefix}ReviewRemark`;
+  const sourceStatus = source?.[statusKey] || "none";
+  const targetStatus = target?.[statusKey] || "none";
+  const sourcePriority = reviewStatusPriority(sourceStatus);
+  const targetPriority = reviewStatusPriority(targetStatus);
+  const sourceTime = parsedTime(source?.[atKey]);
+  const targetTime = parsedTime(target?.[atKey]);
+  if (!sourcePriority) return;
+  if (sourcePriority > targetPriority || (sourcePriority === targetPriority && sourceTime > targetTime)) {
+    target[statusKey] = sourceStatus;
+    target[byKey] = source?.[byKey] || null;
+    target[atKey] = source?.[atKey] || "";
+    target[remarkKey] = source?.[remarkKey] || "";
+  }
+}
+
+function mergeCustomerLeadInto(db, target, source) {
+  if (!target || !source || Number(target.id) === Number(source.id)) return;
+  target.contractAttachmentIds = mergeUniqueNumberLists(target.contractAttachmentIds, source.contractAttachmentIds);
+  target.voucherAttachmentIds = mergeUniqueNumberLists(target.voucherAttachmentIds, source.voucherAttachmentIds);
+  mergeLeadReviewFields(target, source, "contract");
+  mergeLeadReviewFields(target, source, "voucher");
+  if (parsedTime(source.voucherDueAt) > parsedTime(target.voucherDueAt)) target.voucherDueAt = source.voucherDueAt;
+  if (!target.ownerSalesId && source.ownerSalesId) target.ownerSalesId = source.ownerSalesId;
+  if (!target.previousOwnerSalesId && source.previousOwnerSalesId) target.previousOwnerSalesId = source.previousOwnerSalesId;
+  if (parsedTime(source.protectedUntil) > parsedTime(target.protectedUntil)) target.protectedUntil = source.protectedUntil;
+  if (parsedTime(source.createdAt) && (!parsedTime(target.createdAt) || parsedTime(source.createdAt) < parsedTime(target.createdAt))) {
+    target.createdAt = source.createdAt;
+  }
+  target.contactVersions = normalizeLeadContactVersions([
+    ...(target.contactVersions || []),
+    ...(source.contactVersions || [])
+  ]);
+  db.attachments.forEach((attachment) => {
+    if (Number(attachment.leadId || 0) === Number(source.id)) attachment.leadId = target.id;
+  });
+}
+
+function restoreOrphanConvertedCustomerLeads(db) {
+  let changed = false;
+  const removeIds = new Set();
+  db.customerLeads.forEach((lead) => {
+    if (lead.status !== "converted") return;
+    if (activeCurrentOrderForCompany(db, lead.eventId, lead.companyId)) return;
+    const duplicate = db.customerLeads.find((item) => (
+      Number(item.id) !== Number(lead.id)
+      && String(item.eventId) === String(lead.eventId)
+      && Number(item.companyId) === Number(lead.companyId)
+      && item.status !== "converted"
+    ));
+    if (duplicate) {
+      mergeCustomerLeadInto(db, duplicate, lead);
+      removeIds.add(Number(lead.id));
+      changed = true;
+      return;
+    }
+    lead.status = "protected";
+    lead.convertedAt = "";
+    lead.releasedAt = "";
+    lead.publicReason = "";
+    if (!lead.protectedUntil) {
+      const protectDays = lead.customerType === "old"
+        ? Number(db.settings.rules.oldCustomerProtectDays ?? 30)
+        : Number(db.settings.rules.newCustomerProtectDays ?? 30);
+      lead.protectedUntil = addDays(nowIso(), protectDays);
+    }
+    changed = true;
+  });
+  if (removeIds.size) {
+    db.customerLeads = db.customerLeads.filter((lead) => !removeIds.has(Number(lead.id)));
+  }
+  return changed;
 }
 
 function isLikelyDuplicatePayment(left, right) {
@@ -1868,6 +2089,23 @@ function rectInsideBooth(rect, booth) {
     && Number(rect.y || 0) + epsilon >= top
     && Number(rect.x || 0) + Number(rect.width || 0) <= right + epsilon
     && Number(rect.y || 0) + Number(rect.height || 0) <= bottom + epsilon;
+}
+
+function moveInternalObstaclesForBooth(db, booth, dx, dy) {
+  if (!booth || (!dx && !dy)) return;
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+  const eventId = String(booth.eventId || currentEventId(db));
+  db.obstacles
+    .filter((obstacle) => (
+      obstacle.type === "internal"
+      && Number(obstacle.boothId) === Number(booth.id)
+      && String(obstacleEventId(db, obstacle)) === eventId
+    ))
+    .forEach((obstacle) => {
+      obstacle.x = preciseCoord(Number(obstacle.x || 0) + dx);
+      obstacle.y = preciseCoord(Number(obstacle.y || 0) + dy);
+      obstacle.updatedAt = nowIso();
+    });
 }
 
 function scaleBoothsToMap(db, oldWidth, oldHeight, newWidth, newHeight) {
@@ -3163,6 +3401,8 @@ async function handleApi(req, res, url, body = {}) {
     const positionOnlyUpdate = bodyKeys.length > 0 && bodyKeys.every((key) => ["x", "y"].includes(key));
     if (booth.status === "sold" && !positionOnlyUpdate) return sendError(res, 409, "已成交展位不可直接编辑");
     if (booth.locked && body.locked !== false) return sendError(res, 409, "展位已锁定，请先解锁再编辑");
+    const previousX = Number(booth.x || 0);
+    const previousY = Number(booth.y || 0);
     if (body.departmentId !== undefined && !isSuperAdmin(user)) return sendError(res, 403, "只有超级管理员可以分配展位部门");
     if (body.boothNo !== undefined) {
       const boothNo = String(body.boothNo || "").trim();
@@ -3177,6 +3417,9 @@ async function handleApi(req, res, url, body = {}) {
     ["x", "y", "width", "height", "area", "widthM", "depthM"].forEach((key) => {
       if (body[key] !== undefined) booth[key] = Number(body[key]);
     });
+    if (body.x !== undefined || body.y !== undefined) {
+      moveInternalObstaclesForBooth(db, booth, Number(booth.x || 0) - previousX, Number(booth.y || 0) - previousY);
+    }
     if (body.locked !== undefined) booth.locked = Boolean(body.locked);
     refreshBoothBilling(db, booth);
     booth.updatedAt = nowIso();
@@ -3217,6 +3460,8 @@ async function handleApi(req, res, url, body = {}) {
       const booth = db.booths.find((item) => item.id === boothId && !item.locked && String(item.eventId || db.settings.event.id) === String(db.settings.event.id));
       if (!booth) return;
       if (booth.status === "sold" && hasNonPositionPatch) return;
+      const previousX = Number(booth.x || 0);
+      const previousY = Number(booth.y || 0);
       const canApplyNonPositionPatch = booth.status !== "sold";
       if (canApplyNonPositionPatch) {
         ["hall", "zone", "attr", "status"].forEach((key) => {
@@ -3236,6 +3481,7 @@ async function handleApi(req, res, url, body = {}) {
           }
         });
       }
+      moveInternalObstaclesForBooth(db, booth, Number(booth.x || 0) - previousX, Number(booth.y || 0) - previousY);
       refreshBoothBilling(db, booth);
       booth.updatedAt = nowIso();
       changed.push(booth);
