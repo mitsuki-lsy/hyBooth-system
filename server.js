@@ -909,12 +909,73 @@ function materializeOldCustomerLeads(db) {
   return changed;
 }
 
+function releasedOrderCanBeRestoredForLead(db, order) {
+  if (!order || order.status !== "released") return false;
+  const releaseReason = String(order.releaseReason || "");
+  if (releaseReason.includes("\u9a73\u56de") || releaseReason.toLowerCase().includes("reject")) return false;
+  if (db.payments.some((payment) => Number(payment.orderId) === Number(order.id) && payment.status === "rejected")) return false;
+  if (order.type !== "booth") return true;
+  return (order.boothIds || []).every((boothId) => {
+    const booth = db.booths.find((item) => Number(item.id) === Number(boothId));
+    if (!booth) return false;
+    const occupiedByOtherActiveOrder = db.orders.some((item) => (
+      Number(item.id) !== Number(order.id)
+      && item.type === "booth"
+      && isActiveOrder(item)
+      && (item.boothIds || []).some((itemBoothId) => Number(itemBoothId) === Number(boothId))
+    ));
+    return !occupiedByOtherActiveOrder && (booth.status !== "sold" || Number(booth.orderId || 0) === Number(order.id));
+  });
+}
+
+function restoreApprovedLeadOrders(db) {
+  let changed = false;
+  db.customerLeads
+    .filter((lead) => lead.voucherReviewStatus === "approved")
+    .forEach((lead) => {
+      if (activeCurrentOrderForCompany(db, lead.eventId, lead.companyId)) return;
+      const order = db.orders
+        .filter((item) => (
+          String(item.eventId) === String(lead.eventId)
+          && Number(item.companyId) === Number(lead.companyId)
+          && releasedOrderCanBeRestoredForLead(db, item)
+        ))
+        .sort((left, right) => parsedTime(right.updatedAt || right.releasedAt || right.createdAt) - parsedTime(left.updatedAt || left.releasedAt || left.createdAt))[0];
+      if (!order) return;
+      const approved = orderWorkflow.approvedPaymentAmount(db.payments, order.id);
+      const depositRequired = orderWorkflow.depositRequired(db.settings, order);
+      order.paidApprovedAmount = approved;
+      order.depositRequired = depositRequired;
+      order.status = order.specialApproved || (approved >= depositRequired && Number(order.totalAmount || 0) > 0)
+        ? "sold"
+        : (orderWorkflow.hasPendingPayment(db.payments, order.id) ? "pending_payment_review" : "reserved");
+      order.releasedAt = "";
+      order.releaseReason = "";
+      order.updatedAt = nowIso();
+      if (order.type === "booth") {
+        (order.boothIds || []).forEach((boothId) => {
+          const booth = db.booths.find((item) => Number(item.id) === Number(boothId));
+          if (!booth) return;
+          booth.status = order.status === "sold" ? "sold" : "reserved";
+          booth.orderId = order.id;
+          booth.reservedBy = order.salespersonId;
+          booth.reservedAt = booth.reservedAt || order.createdAt || nowIso();
+          booth.updatedAt = nowIso();
+        });
+        if (order.status === "sold") ensureProfile(db, order);
+      }
+      changed = ensureCustomerLeadForOrder(db, order) || true;
+    });
+  return changed;
+}
+
 function syncCustomerLeadsForCurrentEvent(db) {
+  const changedRestoredOrders = restoreApprovedLeadOrders(db);
   const changedOrderVisibility = syncOrderCustomerVisibility(db);
   const changedOrphanConverted = restoreOrphanConvertedCustomerLeads(db);
   const changedOld = materializeOldCustomerLeads(db);
   const changedRelease = releaseExpiredCustomerLeads(db);
-  return changedOrderVisibility || changedOrphanConverted || changedOld || changedRelease;
+  return changedRestoredOrders || changedOrderVisibility || changedOrphanConverted || changedOld || changedRelease;
 }
 
 function markCustomerLeadConverted(db, eventId, companyId, leadId = 0) {
