@@ -281,6 +281,7 @@ const App = (() => {
   }
 
   function statusBadge(status) {
+    if (status === "customer_approved") return `<span class="status approved">\u5df2\u901a\u8fc7\u5ba2\u6237\u5ba1\u6838</span>`;
     return `<span class="status ${h(status)}">${h(statusText(status))}</span>`;
   }
 
@@ -2459,6 +2460,37 @@ const App = (() => {
     ));
   }
 
+  function isLeadOnlyExhibitorRow(order) {
+    return Boolean(order?.__leadOnly);
+  }
+
+  function approvedLeadExhibitorRows() {
+    return (state.data.customerLeads || [])
+      .filter((lead) => (
+        lead.status !== "public"
+        && lead.voucherReviewStatus === "approved"
+        && !activeOrderForCompany(lead.companyId)
+      ))
+      .map((lead) => ({
+        __leadOnly: true,
+        leadId: lead.id,
+        id: `lead-${lead.id}`,
+        eventId: lead.eventId,
+        orderNo: `LEAD-${lead.id}`,
+        type: "lead",
+        title: "\u5f85\u521b\u5efa\u8ba2\u5355",
+        companyId: lead.companyId,
+        salespersonId: lead.ownerSalesId,
+        boothIds: [],
+        boothSnapshot: [],
+        totalAmount: 0,
+        paidApprovedAmount: 0,
+        depositRequired: 0,
+        status: "customer_approved",
+        createdAt: lead.voucherReviewedAt || lead.contractReviewedAt || lead.updatedAt || lead.createdAt || ""
+      }));
+  }
+
   function customerAdvancedOptions() {
     return [
       ["", "全部客户"],
@@ -4095,6 +4127,13 @@ const App = (() => {
   }
 
   function orderActionButtons(order) {
+    if (isLeadOnlyExhibitorRow(order)) {
+      return `
+        <div class="action-buttons">
+          <button class="tiny" onclick="App.customerAttend(${Number(order.companyId)}, ${Number(order.leadId || 0)})">\u521b\u5efa\u8ba2\u5355</button>
+        </div>
+      `;
+    }
     const canOperate = state.data.me.role !== "enterprise" && isActiveOrder(order);
     const canIssue = canOperate && order.type === "booth" && order.status === "sold";
     return `
@@ -4614,8 +4653,10 @@ const App = (() => {
   }
 
   function viewExhibitorList() {
-    const allRows = state.data.orders
-      .filter((order) => isActiveOrder(order))
+    const allRows = [
+      ...state.data.orders.filter((order) => isActiveOrder(order)),
+      ...approvedLeadExhibitorRows()
+    ]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const rows = filterOrdersByDrill(allRows, state.exhibitorFilter);
     const filterLabel = exhibitorFilterLabel(state.exhibitorFilter);
