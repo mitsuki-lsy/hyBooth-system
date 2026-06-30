@@ -120,6 +120,7 @@ const App = (() => {
     activityAreaDrawing: null,
     activityAreaDragging: null,
     selectedActivityAreaId: null,
+    selectedActivityAreaIds: new Set(),
     suppressActivityAreaClick: false,
     dragging: null,
     drawMode: false,
@@ -433,6 +434,7 @@ const App = (() => {
       state.selectedBoothIds.clear();
       state.selectedObstacleId = null;
       state.selectedActivityAreaId = null;
+      state.selectedActivityAreaIds.clear();
       render();
       restoreMapScroll(scroll);
     }
@@ -2424,8 +2426,13 @@ const App = (() => {
   }
 
   function leadRows(type, status) {
+    const allowedStatuses = Array.isArray(status) ? new Set(status) : null;
     return (state.data.customerLeads || [])
-      .filter((lead) => (!type || lead.customerType === type) && (!status || lead.status === status))
+      .filter((lead) => {
+        if (type && lead.customerType !== type) return false;
+        if (allowedStatuses) return allowedStatuses.has(lead.status);
+        return !status || lead.status === status;
+      })
       .sort((a, b) => new Date(a.protectedUntil || a.createdAt || 0) - new Date(b.protectedUntil || b.createdAt || 0));
   }
 
@@ -2511,12 +2518,14 @@ const App = (() => {
 
   function customerCreateOrderAction(lead, company) {
     const order = activeOrderForCompany(lead.companyId);
+    if (order?.status === "sold") return `<span class="status sold">已成交</span>`;
     if (order) return `<span class="status reserved">已创建订单</span>`;
     return `<button class="tiny" onclick="App.customerAttend(${Number(company.id)}, ${Number(lead.id)})">创建订单</button>`;
   }
 
   function newCustomerActions(lead, company) {
     const order = activeOrderForCompany(lead.companyId);
+    if (order?.status === "sold") return `<span class="status sold">已成交</span>`;
     if (order) return `<span class="status reserved">已创建订单</span>`;
     return `<div class="inline-actions">${customerCreateOrderAction(lead, company)}${customerReleaseAction(lead)}</div>`;
   }
@@ -2715,7 +2724,7 @@ const App = (() => {
   }
 
   function viewNewCustomers() {
-    const rows = leadRows("new", "protected").filter((lead) => leadMatchesAdvancedFilter(lead, state.newCustomerFilter));
+    const rows = leadRows("new", ["protected", "converted"]).filter((lead) => leadMatchesAdvancedFilter(lead, state.newCustomerFilter));
     const action = (lead, company) => newCustomerActions(lead, company);
     return `
       <section class="section">
@@ -2763,7 +2772,7 @@ const App = (() => {
   }
 
   function viewOldCustomers() {
-    const rows = leadRows("old", "protected").filter((lead) => leadMatchesAdvancedFilter(lead, state.oldCustomerFilter));
+    const rows = leadRows("old", ["protected", "converted"]).filter((lead) => leadMatchesAdvancedFilter(lead, state.oldCustomerFilter));
     const event = state.data.settings.event || {};
     return `
       <section class="section">
@@ -3029,7 +3038,7 @@ const App = (() => {
 
   function activityAreaSvgElements(interactive = true) {
     return (state.data.activityAreas || []).map((area) => {
-      const selected = state.selectedActivityAreaId === area.id;
+      const selected = state.selectedActivityAreaId === area.id || state.selectedActivityAreaIds.has(area.id);
       const textVisible = area.width >= 36 && area.height >= 20;
       const title = [
         `活动区：${area.name || "活动区"}`,
@@ -3588,7 +3597,7 @@ const App = (() => {
         <div class="compact-list">
           <div class="compact-item">
             <strong>已绘制 ${areas.length} 个活动区</strong>
-            <div class="hint">点击“绘制活动区”后，在展位图上像绘制展位一样拖拽即可创建；活动区不会加入展位选择，也不会影响展位计价。</div>
+            <div class="hint">点击“绘制活动区”后，在展位图上像绘制展位一样拖拽即可创建；活动区可框选并参与对齐，不会影响展位计价。</div>
           </div>
         </div>
       `;
@@ -3612,6 +3621,26 @@ const App = (() => {
         <button onclick="App.saveActivityArea()">保存活动区</button>
         <button class="danger" onclick="App.deleteActivityArea(${area.id})">删除活动区</button>
         <button class="secondary" onclick="App.clearActivityAreaSelection()">取消选择</button>
+      </div>
+      <div class="split-actions">
+        <span class="axis-align-control">
+          <label>沿 X 轴<select id="booth-align-x-mode">
+            <option value="align:start">上对齐</option>
+            <option value="align:end">下对齐</option>
+            <option value="attach:start">上对齐并贴合</option>
+            <option value="attach:end">下对齐并贴合</option>
+          </select></label>
+          <button class="secondary" onclick="App.applyBoothAlignment('x')">执行</button>
+        </span>
+        <span class="axis-align-control">
+          <label>沿 Y 轴<select id="booth-align-y-mode">
+            <option value="align:start">左对齐</option>
+            <option value="align:end">右对齐</option>
+            <option value="attach:start">左对齐并贴合</option>
+            <option value="attach:end">右对齐并贴合</option>
+          </select></label>
+          <button class="secondary" onclick="App.applyBoothAlignment('y')">执行</button>
+        </span>
       </div>
     `;
   }
@@ -4960,11 +4989,29 @@ const App = (() => {
 
   function svgPoint(event) {
     const svg = byId("boothSvg");
+    if (!svg) return null;
+    const matrix = svg.getScreenCTM?.();
+    if (!matrix) return null;
     const point = svg.createSVGPoint();
     point.x = event.clientX;
     point.y = event.clientY;
-    const matrix = svg.getScreenCTM().inverse();
-    return point.matrixTransform(matrix);
+    const transformed = point.matrixTransform(matrix.inverse());
+    if (!Number.isFinite(transformed.x) || !Number.isFinite(transformed.y)) return null;
+    return transformed;
+  }
+
+  function bringDraggedBoothsToFront(boothIds) {
+    const svg = byId("boothSvg");
+    if (!svg) return;
+    const ids = [...new Set((boothIds || []).map(Number).filter(Boolean))];
+    ids.forEach((id) => {
+      const group = svg.querySelector(`g[data-booth-id="${id}"]`);
+      if (group) svg.appendChild(group);
+    });
+    internalObstaclesForBooths(ids).forEach((obstacle) => {
+      const group = svg.querySelector(`g[data-obstacle-id="${obstacle.id}"]`);
+      if (group) svg.appendChild(group);
+    });
   }
 
   function clearTextSelection() {
@@ -5034,6 +5081,24 @@ const App = (() => {
     updateBoothLabelSvgPosition(text, booth);
   }
 
+  function updateObstacleSvgPosition(obstacle) {
+    const shapeElement = document.querySelector(`g[data-obstacle-id="${obstacle.id}"] .obstacle-shape`);
+    const text = document.querySelector(`g[data-obstacle-id="${obstacle.id}"] text`);
+    setShapeGeometry(shapeElement, obstacle, obstacleShape(obstacle));
+    if (text) {
+      text.setAttribute("x", Number(obstacle.x || 0) + Number(obstacle.width || 0) / 2);
+      text.setAttribute("y", Number(obstacle.y || 0) + Number(obstacle.height || 0) / 2);
+    }
+  }
+
+  function internalObstaclesForBooths(boothIds) {
+    const ids = new Set((boothIds || []).map(Number));
+    return (state.data.obstacles || []).filter((obstacle) => (
+      obstacle.type === "internal"
+      && ids.has(Number(obstacle.boothId))
+    ));
+  }
+
   function rectFromPoints(start, end) {
     return {
       x: Math.min(start.x, end.x),
@@ -5084,6 +5149,81 @@ const App = (() => {
     return [...state.selectedBoothIds]
       .map((id) => state.data.booths.find((booth) => booth.id === id))
       .filter((booth) => booth && booth.status === "available" && !booth.locked);
+  }
+
+  function selectedMovableBooths() {
+    return [...state.selectedBoothIds]
+      .map((id) => state.data.booths.find((booth) => booth.id === id))
+      .filter((booth) => booth && !booth.locked);
+  }
+
+  function selectedActivityAreas() {
+    const ids = new Set(state.selectedActivityAreaIds);
+    if (state.selectedActivityAreaId) ids.add(state.selectedActivityAreaId);
+    return [...ids]
+      .map((id) => (state.data.activityAreas || []).find((area) => Number(area.id) === Number(id)))
+      .filter(Boolean);
+  }
+
+  function selectedAlignableItems() {
+    return [
+      ...selectedMovableBooths().map((booth) => ({
+        ...booth,
+        kind: "booth",
+        label: booth.boothNo || `#${booth.id}`
+      })),
+      ...selectedActivityAreas().map((area) => ({
+        ...area,
+        kind: "activityArea",
+        label: area.name || `#${area.id}`
+      }))
+    ];
+  }
+
+  function selectedAlignmentBase(items) {
+    return items.find((item) => item.kind === "booth" && Number(item.id) === Number(state.selectedBoothId))
+      || items.find((item) => item.kind === "activityArea" && Number(item.id) === Number(state.selectedActivityAreaId))
+      || items[0]
+      || null;
+  }
+
+  async function saveAlignableItemPositions(items, positions, success) {
+    const byKey = new Map(items.map((item) => [`${item.kind}:${item.id}`, item]));
+    const boothPositions = [];
+    const areaPositions = [];
+    positions.forEach((position) => {
+      const item = byKey.get(`${position.kind}:${position.id}`);
+      if (!item) return;
+      if (item.kind === "booth") {
+        boothPositions.push({ id: item.id, x: position.x, y: position.y });
+      } else if (item.kind === "activityArea") {
+        areaPositions.push({ id: item.id, x: position.x, y: position.y });
+      }
+    });
+    await run(async () => {
+      const result = { booths: [], activityAreas: [] };
+      if (boothPositions.length) {
+        const boothResult = await api("/api/booths/batch", {
+          method: "POST",
+          body: { ids: boothPositions.map((item) => item.id), positions: boothPositions }
+        });
+        result.booths = boothResult?.booths || [];
+      }
+      if (areaPositions.length) {
+        const areaResults = await Promise.all(areaPositions.map((item) => api(`/api/activity-areas/${item.id}`, {
+          method: "PUT",
+          body: { x: item.x, y: item.y }
+        })));
+        result.activityAreas = areaResults.map((item) => item?.activityArea).filter(Boolean);
+      }
+      return result;
+    }, success, {
+      refresh: false,
+      apply: (result) => {
+        (result?.booths || []).forEach((item) => replaceById("booths", item));
+        (result?.activityAreas || []).forEach((item) => replaceById("activityAreas", item));
+      }
+    });
   }
 
   function selectedOrderableBooths() {
@@ -6410,6 +6550,7 @@ const App = (() => {
           state.selectedBoothIds.clear();
           state.selectedObstacleId = null;
           state.selectedActivityAreaId = null;
+          state.selectedActivityAreaIds.clear();
         }
       });
       restoreMapScroll(scroll);
@@ -6439,6 +6580,7 @@ const App = (() => {
           if (!result?.activityArea) return;
           state.data.activityAreas.push(result.activityArea);
           state.selectedActivityAreaId = result.activityArea.id;
+          state.selectedActivityAreaIds = new Set([result.activityArea.id]);
           state.selectedBoothId = null;
           state.selectedBoothIds.clear();
           state.selectedObstacleId = null;
@@ -6453,16 +6595,20 @@ const App = (() => {
       const obstacleGroup = event.target.closest("g[data-obstacle-id]");
       const activityAreaGroup = event.target.closest("g[data-activity-area-id]");
       if (state.obstacleMode) {
+        const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
         state.obstacleDrawing = {
-          start: svgPoint(event),
+          start,
           type: state.obstacleMode
         };
         return;
       }
       if (state.activityAreaMode) {
+        const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
-        state.activityAreaDrawing = svgPoint(event);
+        state.activityAreaDrawing = start;
         return;
       }
       if (activityAreaGroup) {
@@ -6470,9 +6616,29 @@ const App = (() => {
         const areaId = Number(activityAreaGroup.dataset.activityAreaId);
         const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
         if (!area) return;
+        if (event.shiftKey || event.ctrlKey || event.metaKey) {
+          beginMapPointerInteraction(event);
+          state.suppressActivityAreaClick = true;
+          if (state.selectedActivityAreaIds.has(areaId)) state.selectedActivityAreaIds.delete(areaId);
+          else state.selectedActivityAreaIds.add(areaId);
+          state.selectedActivityAreaId = state.selectedActivityAreaIds.has(areaId)
+            ? areaId
+            : [...state.selectedActivityAreaIds][0] || null;
+          state.selectedBoothId = null;
+          state.selectedBoothIds.clear();
+          state.selectedObstacleId = null;
+          render();
+          endMapPointerInteraction();
+          setTimeout(() => {
+            state.suppressActivityAreaClick = false;
+          }, 150);
+          return;
+        }
         const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
         state.selectedActivityAreaId = areaId;
+        if (!state.selectedActivityAreaIds.has(areaId)) state.selectedActivityAreaIds = new Set([areaId]);
         state.selectedBoothId = null;
         state.selectedBoothIds.clear();
         state.selectedObstacleId = null;
@@ -6493,9 +6659,11 @@ const App = (() => {
         const obstacle = (state.data.obstacles || []).find((item) => item.id === obstacleId);
         if (!obstacle) return;
         const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
         state.selectedObstacleId = obstacleId;
         state.selectedActivityAreaId = null;
+        state.selectedActivityAreaIds.clear();
         if (obstacle.boothId) state.selectedBoothId = Number(obstacle.boothId);
         state.mapObstacleDragSnapshot = cloneMapSnapshot();
         state.obstacleDragging = {
@@ -6513,46 +6681,61 @@ const App = (() => {
         const booth = state.data.booths.find((item) => item.id === boothId);
         if (!booth || booth.locked) return;
         const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
         state.selectedBoothId = boothId;
         state.selectedActivityAreaId = null;
+        state.selectedActivityAreaIds.clear();
         state.mapDragSnapshot = cloneMapSnapshot();
         const batchBooths = state.batchDragMode && state.selectedBoothIds.has(boothId)
           ? [...state.selectedBoothIds]
             .map((id) => state.data.booths.find((item) => item.id === id))
             .filter((item) => item && !item.locked)
           : [];
+        const dragBooths = batchBooths.length > 1 ? batchBooths : [booth];
+        const internalObstacles = internalObstaclesForBooths(dragBooths.map((item) => item.id));
         state.dragging = {
           boothId,
-          boothIds: batchBooths.length > 1 ? batchBooths.map((item) => item.id) : [boothId],
+          boothIds: dragBooths.map((item) => item.id),
           startX: start.x,
           startY: start.y,
           originalX: booth.x,
           originalY: booth.y,
-          originalPositions: Object.fromEntries((batchBooths.length > 1 ? batchBooths : [booth]).map((item) => [
+          originalPositions: Object.fromEntries(dragBooths.map((item) => [
             item.id,
             { x: Number(item.x || 0), y: Number(item.y || 0), width: Number(item.width || 0), height: Number(item.height || 0) }
           ])),
+          originalObstaclePositions: Object.fromEntries(internalObstacles.map((item) => [
+            item.id,
+            { x: Number(item.x || 0), y: Number(item.y || 0) }
+          ])),
           moved: false
         };
+        bringDraggedBoothsToFront(state.dragging.boothIds);
         return;
       }
       if (!state.drawMode && !group) {
+        const start = svgPoint(event);
+        if (!start) return;
         beginMapPointerInteraction(event);
         state.selecting = {
-          start: svgPoint(event),
+          start,
           additive: event.shiftKey || event.ctrlKey || event.metaKey
         };
         return;
       }
       if (!state.drawMode || group) return;
+      const start = svgPoint(event);
+      if (!start) return;
       beginMapPointerInteraction(event);
-      state.drawing = svgPoint(event);
+      state.drawing = start;
     },
     mapMove(event) {
       if (hasMapPointerInteraction()) event.preventDefault();
       if (state.obstacleDrawing) {
-        const rect = rectFromPoints(state.obstacleDrawing.start, svgPoint(event));
+        const point = svgPoint(event);
+        if (!point) return;
+        const rect = rectFromPoints(state.obstacleDrawing.start, point);
         updatePreviewRect("obstacle-preview", rect, {
           fill: state.obstacleDrawing.type === "internal" ? "rgba(194, 65, 65, 0.22)" : "rgba(100, 116, 139, 0.22)",
           stroke: state.obstacleDrawing.type === "internal" ? "#c24141" : "#475569",
@@ -6562,7 +6745,9 @@ const App = (() => {
         return;
       }
       if (state.activityAreaDrawing) {
-        const rect = rectFromPoints(state.activityAreaDrawing, svgPoint(event));
+        const point = svgPoint(event);
+        if (!point) return;
+        const rect = rectFromPoints(state.activityAreaDrawing, point);
         updatePreviewRect("activity-area-preview", rect, {
           fill: "rgba(14, 165, 233, 0.18)",
           stroke: "#0284c7",
@@ -6573,6 +6758,7 @@ const App = (() => {
       }
       if (state.obstacleDragging) {
         const point = svgPoint(event);
+        if (!point) return;
         const dx = Math.round(point.x - state.obstacleDragging.startX);
         const dy = Math.round(point.y - state.obstacleDragging.startY);
         if (Math.abs(dx) + Math.abs(dy) < 1) return;
@@ -6598,6 +6784,7 @@ const App = (() => {
       }
       if (state.activityAreaDragging) {
         const point = svgPoint(event);
+        if (!point) return;
         const dx = Math.round(point.x - state.activityAreaDragging.startX);
         const dy = Math.round(point.y - state.activityAreaDragging.startY);
         if (Math.abs(dx) + Math.abs(dy) < 1) return;
@@ -6624,7 +6811,9 @@ const App = (() => {
         return;
       }
       if (state.selecting) {
-        const rect = rectFromPoints(state.selecting.start, svgPoint(event));
+        const point = svgPoint(event);
+        if (!point) return;
+        const rect = rectFromPoints(state.selecting.start, point);
         updatePreviewRect("selection-preview", rect, {
           fill: "rgba(24, 160, 88, 0.12)",
           stroke: "#18a058",
@@ -6635,6 +6824,7 @@ const App = (() => {
       }
       if (state.drawing) {
         const point = svgPoint(event);
+        if (!point) return;
         const rect = rectFromPoints(state.drawing, point);
         updatePreviewRect("drawing-preview", rect, {
           fill: "rgba(35, 100, 170, 0.18)",
@@ -6646,6 +6836,7 @@ const App = (() => {
       }
       if (!state.dragging) return;
       const point = svgPoint(event);
+      if (!point) return;
       const dx = Math.round(point.x - state.dragging.startX);
       const dy = Math.round(point.y - state.dragging.startY);
       if (Math.abs(dx) + Math.abs(dy) < 1) return;
@@ -6668,6 +6859,14 @@ const App = (() => {
         booth.y = Number(original.y || 0) + clampedDy;
         updateBoothSvgPosition(booth);
       });
+      const obstacleOriginals = state.dragging.originalObstaclePositions || {};
+      internalObstaclesForBooths(dragIds).forEach((obstacle) => {
+        const original = obstacleOriginals[obstacle.id] || { x: Number(obstacle.x || 0), y: Number(obstacle.y || 0) };
+        obstacle.x = Number(original.x || 0) + clampedDx;
+        obstacle.y = Number(original.y || 0) + clampedDy;
+        updateObstacleSvgPosition(obstacle);
+      });
+      draggedBooths.forEach((booth) => updateBoothLabelForId(booth.id));
     },
     async mapUp(event) {
       endMapPointerInteraction();
@@ -6676,7 +6875,9 @@ const App = (() => {
         state.obstacleDrawing = null;
         const preview = byId("obstacle-preview");
         if (preview) preview.remove();
-        const rect = rectFromPoints(drawing.start, svgPoint(event));
+        const end = svgPoint(event);
+        if (!end) return;
+        const rect = rectFromPoints(drawing.start, end);
         if (rect.width < 6 || rect.height < 6) return;
         let boothId = null;
         if (drawing.type === "internal") {
@@ -6710,7 +6911,9 @@ const App = (() => {
         state.activityAreaDrawing = null;
         const preview = byId("activity-area-preview");
         if (preview) preview.remove();
-        const rect = rectFromPoints(start, svgPoint(event));
+        const end = svgPoint(event);
+        if (!end) return;
+        const rect = rectFromPoints(start, end);
         if (rect.width < 12 || rect.height < 12) return;
         await this.createActivityAreaFromRect(rect, "活动区已创建");
         return;
@@ -6792,20 +6995,34 @@ const App = (() => {
         state.selecting = null;
         const preview = byId("selection-preview");
         if (preview) preview.remove();
-        const rect = rectFromPoints(selecting.start, svgPoint(event));
+        const end = svgPoint(event);
+        if (!end) return;
+        const rect = rectFromPoints(selecting.start, end);
         if (rect.width < 8 || rect.height < 8) return;
         const hits = state.data.booths
-          .filter((booth) => booth.status === "available" && !booth.locked && boothIntersectsRect(booth, rect))
+          .filter((booth) => !booth.locked && boothIntersectsRect(booth, rect))
+          .sort((a, b) => (Number(a.y || 0) - Number(b.y || 0)) || (Number(a.x || 0) - Number(b.x || 0)));
+        const areaHits = (state.data.activityAreas || [])
+          .filter((area) => boothIntersectsRect(area, rect))
           .sort((a, b) => (Number(a.y || 0) - Number(b.y || 0)) || (Number(a.x || 0) - Number(b.x || 0)));
         const selected = selecting.additive ? new Set(state.selectedBoothIds) : new Set();
+        const selectedAreas = selecting.additive ? new Set(state.selectedActivityAreaIds) : new Set();
         hits.forEach((booth) => selected.add(booth.id));
+        areaHits.forEach((area) => selectedAreas.add(area.id));
         state.selectedBoothIds = selected;
+        state.selectedActivityAreaIds = selectedAreas;
         if (!selecting.additive || !state.selectedBoothIds.has(state.selectedBoothId)) {
           state.selectedBoothId = hits[0]?.id || null;
         }
-        state.selectedActivityAreaId = null;
+        if (!selecting.additive || !state.selectedActivityAreaIds.has(state.selectedActivityAreaId)) {
+          state.selectedActivityAreaId = areaHits[0]?.id || null;
+        }
         const baseBooth = state.data.booths.find((item) => item.id === state.selectedBoothId);
-        state.message = hits.length ? `已框选 ${hits.length} 个空闲展位，基点为 ${baseBooth?.boothNo || "-"}，可在右侧批量更新或对齐` : "框选范围内没有空闲展位";
+        const baseArea = (state.data.activityAreas || []).find((item) => item.id === state.selectedActivityAreaId);
+        const totalHits = hits.length + areaHits.length;
+        state.message = totalHits
+          ? `已框选 ${hits.length} 个展位 / ${areaHits.length} 个活动区，基点为 ${baseBooth?.boothNo || baseArea?.name || "-"}`
+          : "框选范围内没有可选对象";
         render();
         return;
       }
@@ -6847,6 +7064,13 @@ const App = (() => {
                   current.y = position.y;
                 }
               });
+              Object.entries(drag.originalObstaclePositions || {}).forEach(([id, position]) => {
+                const current = (state.data.obstacles || []).find((item) => Number(item.id) === Number(id));
+                if (current) {
+                  current.x = position.x;
+                  current.y = position.y;
+                }
+              });
               render();
             }
             restoreMapScroll(scroll);
@@ -6857,6 +7081,7 @@ const App = (() => {
       }
       if (!state.drawing || !isAdminLikeRole(state.data.me.role) || !state.drawMode) return;
       const end = svgPoint(event);
+      if (!end) return;
       const preview = byId("drawing-preview");
       if (preview) preview.remove();
       const x = Math.min(state.drawing.x, end.x);
@@ -6891,6 +7116,7 @@ const App = (() => {
         state.selectedBoothId = boothId;
         state.selectedObstacleId = null;
         state.selectedActivityAreaId = null;
+        state.selectedActivityAreaIds.clear();
       } else if (isBoothOrderable(booth)) {
         if (state.selectedBoothIds.has(boothId)) state.selectedBoothIds.delete(boothId);
         else state.selectedBoothIds.add(boothId);
@@ -6908,6 +7134,7 @@ const App = (() => {
       if (!obstacle) return;
       state.selectedObstacleId = obstacleId;
       state.selectedActivityAreaId = null;
+      state.selectedActivityAreaIds.clear();
       if (obstacle.boothId) state.selectedBoothId = obstacle.boothId;
       render();
     },
@@ -6921,6 +7148,7 @@ const App = (() => {
       const area = (state.data.activityAreas || []).find((item) => item.id === areaId);
       if (!area) return;
       state.selectedActivityAreaId = areaId;
+      state.selectedActivityAreaIds = new Set([areaId]);
       state.selectedBoothId = null;
       state.selectedBoothIds.clear();
       state.selectedObstacleId = null;
@@ -6932,6 +7160,7 @@ const App = (() => {
     },
     clearActivityAreaSelection() {
       state.selectedActivityAreaId = null;
+      state.selectedActivityAreaIds.clear();
       state.activityAreaSizePreviewHistoryId = null;
       render();
     },
@@ -7101,6 +7330,7 @@ const App = (() => {
       const result = await run(() => api(`/api/activity-areas/${areaId}`, { method: "DELETE" }), "活动区已删除");
       if (result) {
         state.selectedActivityAreaId = null;
+        state.selectedActivityAreaIds.delete(areaId);
         state.activityAreaSizePreviewHistoryId = null;
         restoreMapScroll(scroll);
       }
@@ -7127,6 +7357,7 @@ const App = (() => {
       state.pendingBoothIds = [];
       state.selectedBoothId = null;
       state.selectedActivityAreaId = null;
+      state.selectedActivityAreaIds.clear();
       state.batchDragMode = false;
       render();
     },
@@ -7596,68 +7827,73 @@ const App = (() => {
       }
     },
     async alignSelectedBooths(axis, edge = "start") {
-      const selected = selectedAvailableBooths();
+      const selected = selectedAlignableItems();
       if (selected.length < 2) {
-        state.error = "请至少框选 2 个空闲展位再对齐";
+        state.error = "请至少选择 2 个展位或活动区再对齐";
         render();
         return;
       }
-      const base = selected.find((booth) => booth.id === state.selectedBoothId) || selected[0];
-      state.selectedBoothId = base.id;
-      const positions = selected.map((booth) => (
+      const base = selectedAlignmentBase(selected);
+      if (base.kind === "booth") state.selectedBoothId = base.id;
+      if (base.kind === "activityArea") state.selectedActivityAreaId = base.id;
+      const positions = selected.map((item) => (
         axis === "x"
           ? {
-              id: booth.id,
-              y: preciseCoord(edge === "end" ? boothBottom(base) - Number(booth.height || 0) : boothTop(base))
+              kind: item.kind,
+              id: item.id,
+              x: preciseCoord(boothLeft(item)),
+              y: preciseCoord(edge === "end" ? boothBottom(base) - Number(item.height || 0) : boothTop(base))
             }
           : {
-              id: booth.id,
-              x: preciseCoord(edge === "end" ? boothRight(base) - Number(booth.width || 0) : boothLeft(base))
+              kind: item.kind,
+              id: item.id,
+              x: preciseCoord(edge === "end" ? boothRight(base) - Number(item.width || 0) : boothLeft(base)),
+              y: preciseCoord(boothTop(item))
             }
       ));
       const label = boothAlignmentLabel(axis, edge);
       rememberMapState();
-      await run(() => api("/api/booths/batch", {
-        method: "POST",
-        body: { ids: selected.map((booth) => booth.id), positions }
-      }), `已沿 ${axis.toUpperCase()} 轴按基点 ${base.boothNo} ${label}`);
+      await saveAlignableItemPositions(selected, positions, `已沿 ${axis.toUpperCase()} 轴按基点 ${base.label} ${label}`);
     },
     async attachSelectedBooths(axis, edge = "start") {
-      const selected = selectedAvailableBooths();
+      const selected = selectedAlignableItems();
       if (selected.length < 2) {
-        state.error = "请至少框选 2 个空闲展位再贴合";
+        state.error = "请至少选择 2 个展位或活动区再贴合";
         render();
         return;
       }
-      const base = selected.find((booth) => booth.id === state.selectedBoothId) || selected[0];
-      state.selectedBoothId = base.id;
+      const base = selectedAlignmentBase(selected);
+      if (base.kind === "booth") state.selectedBoothId = base.id;
+      if (base.kind === "activityArea") state.selectedActivityAreaId = base.id;
       const horizontal = axis === "x";
       const ordered = [...selected].sort((a, b) => (
         horizontal
           ? (boothLeft(a) - boothLeft(b)) || (boothTop(a) - boothTop(b))
           : (boothTop(a) - boothTop(b)) || (boothLeft(a) - boothLeft(b))
       ));
-      const baseIndex = Math.max(0, ordered.findIndex((booth) => booth.id === base.id));
+      const keyFor = (item) => `${item.kind}:${item.id}`;
+      const itemForPosition = (position) => ordered.find((item) => keyFor(item) === position.key);
+      const baseIndex = Math.max(0, ordered.findIndex((item) => keyFor(item) === keyFor(base)));
       const map = state.data.map || {};
       const positions = new Map();
       if (horizontal) {
-        const alignY = (booth) => edge === "end" ? boothBottom(base) - Number(booth.height || 0) : boothTop(base);
+        const alignY = (item) => edge === "end" ? boothBottom(base) - Number(item.height || 0) : boothTop(base);
         let left = Number(base.x || 0);
         let right = Number(base.x || 0) + Number(base.width || 0);
-        positions.set(base.id, { id: base.id, x: Number(base.x || 0), y: alignY(base) });
+        positions.set(keyFor(base), { key: keyFor(base), kind: base.kind, id: base.id, x: Number(base.x || 0), y: alignY(base) });
         for (let index = baseIndex - 1; index >= 0; index -= 1) {
-          const booth = ordered[index];
-          left -= Number(booth.width || 0);
-          positions.set(booth.id, { id: booth.id, x: left, y: alignY(booth) });
+          const item = ordered[index];
+          left -= Number(item.width || 0);
+          positions.set(keyFor(item), { key: keyFor(item), kind: item.kind, id: item.id, x: left, y: alignY(item) });
         }
         for (let index = baseIndex + 1; index < ordered.length; index += 1) {
-          const booth = ordered[index];
-          positions.set(booth.id, { id: booth.id, x: right, y: alignY(booth) });
-          right += Number(booth.width || 0);
+          const item = ordered[index];
+          positions.set(keyFor(item), { key: keyFor(item), kind: item.kind, id: item.id, x: right, y: alignY(item) });
+          right += Number(item.width || 0);
         }
         const values = [...positions.values()];
         const min = Math.min(...values.map((item) => item.x));
-        const max = Math.max(...values.map((item) => item.x + Number(ordered.find((booth) => booth.id === item.id)?.width || 0)));
+        const max = Math.max(...values.map((item) => item.x + Number(itemForPosition(item)?.width || 0)));
         const limit = Number(map.width || max);
         let shift = min < 0 ? -min : 0;
         if (max + shift > limit) {
@@ -7666,23 +7902,23 @@ const App = (() => {
         }
         values.forEach((item) => { item.x += shift; });
       } else {
-        const alignX = (booth) => edge === "end" ? boothRight(base) - Number(booth.width || 0) : boothLeft(base);
+        const alignX = (item) => edge === "end" ? boothRight(base) - Number(item.width || 0) : boothLeft(base);
         let top = Number(base.y || 0);
         let bottom = Number(base.y || 0) + Number(base.height || 0);
-        positions.set(base.id, { id: base.id, x: alignX(base), y: Number(base.y || 0) });
+        positions.set(keyFor(base), { key: keyFor(base), kind: base.kind, id: base.id, x: alignX(base), y: Number(base.y || 0) });
         for (let index = baseIndex - 1; index >= 0; index -= 1) {
-          const booth = ordered[index];
-          top -= Number(booth.height || 0);
-          positions.set(booth.id, { id: booth.id, x: alignX(booth), y: top });
+          const item = ordered[index];
+          top -= Number(item.height || 0);
+          positions.set(keyFor(item), { key: keyFor(item), kind: item.kind, id: item.id, x: alignX(item), y: top });
         }
         for (let index = baseIndex + 1; index < ordered.length; index += 1) {
-          const booth = ordered[index];
-          positions.set(booth.id, { id: booth.id, x: alignX(booth), y: bottom });
-          bottom += Number(booth.height || 0);
+          const item = ordered[index];
+          positions.set(keyFor(item), { key: keyFor(item), kind: item.kind, id: item.id, x: alignX(item), y: bottom });
+          bottom += Number(item.height || 0);
         }
         const values = [...positions.values()];
         const min = Math.min(...values.map((item) => item.y));
-        const max = Math.max(...values.map((item) => item.y + Number(ordered.find((booth) => booth.id === item.id)?.height || 0)));
+        const max = Math.max(...values.map((item) => item.y + Number(itemForPosition(item)?.height || 0)));
         const limit = Number(map.height || max);
         let shift = min < 0 ? -min : 0;
         if (max + shift > limit) {
@@ -7694,14 +7930,12 @@ const App = (() => {
       const label = boothAlignmentLabel(axis, edge);
       const finalPositions = [...positions.values()].map((item) => ({
         id: item.id,
+        kind: item.kind,
         x: preciseCoord(item.x),
         y: preciseCoord(item.y)
       }));
       rememberMapState();
-      await run(() => api("/api/booths/batch", {
-        method: "POST",
-        body: { ids: selected.map((booth) => booth.id), positions: finalPositions }
-      }), `已沿 ${axis.toUpperCase()} 轴按基点 ${base.boothNo} ${label}并贴合`);
+      await saveAlignableItemPositions(selected, finalPositions, `已沿 ${axis.toUpperCase()} 轴按基点 ${base.label} ${label}并贴合`);
     },
     async clearAllBooths() {
       if (!window.confirm("确认清空全部展位？该操作只允许在没有未结束订单时执行。")) return;
@@ -7712,6 +7946,7 @@ const App = (() => {
       state.selectedBoothIds.clear();
       state.selectedObstacleId = null;
       state.selectedActivityAreaId = null;
+      state.selectedActivityAreaIds.clear();
     },
     async generateGrid(replace) {
       const confirmText = replace ? "确认重置现有展位为 520 个样例展位？" : "确认追加 520 个样例展位？";
